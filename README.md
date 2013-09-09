@@ -1,6 +1,6 @@
 # Reservoir extremely simple storage
 
-It can be:
+It will be:
 
 1. Simply expanded
 2. Simply supported
