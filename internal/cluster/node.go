@@ -86,6 +86,28 @@ func NewNodeWithID(nodeID UUIDv7, address string, port int, clusterID UUIDv7) *N
 	return node
 }
 
+// newRemoteNode creates a bookkeeping Node for a peer. Unlike the local node it
+// does NOT start an OptimizedVectorClock background goroutine: only the local
+// node increments a local clock, and creating one OVC per remote peer — on
+// every join and every node-update broadcast — leaked a goroutine each time the
+// peer object was discarded or evicted by the health checker. The nil-OVC path
+// is handled by UpdateVectorClock/GetVectorClock (they fall back to the legacy
+// map).
+func newRemoteNode(nodeID UUIDv7, address string, port int, clusterID UUIDv7) *Node {
+	node := &Node{
+		NodeID:      nodeID,
+		ClusterID:   clusterID,
+		Address:     address,
+		Port:        port,
+		VectorClock: make(map[UUIDv7]uint64),
+		// OptimizedVectorClock intentionally left nil.
+	}
+	node.State.Store(StateFollower)
+	node.LastHeartbeat.Store(time.Now())
+	node.IsAlive.Store(true)
+	return node
+}
+
 // GetState returns the current node state
 func (n *Node) GetState() NodeState {
 	return n.State.Load().(NodeState)

@@ -72,9 +72,8 @@ func (cm *ClusterManager) handleJoinRequest(msg *Message) error {
 		return cm.transport.Send(req.NodeID, MsgJoinResponse, resp)
 	}
 
-	// Add new node using helper for proper initialization
-	newNode := NewNodeWithID(req.NodeID, req.Address, req.Port, req.ClusterID)
-	// Override state if needed (NewNodeWithID defaults to StateFollower)
+	// Add new node using the remote-node helper (no per-peer OVC goroutine).
+	newNode := newRemoteNode(req.NodeID, req.Address, req.Port, req.ClusterID)
 
 	// Connect to new node
 	if err := cm.transport.ConnectToNode(req.NodeID, req.Address, req.Port); err != nil {
@@ -172,8 +171,8 @@ func (cm *ClusterManager) handleJoinResponse(msg *Message) error {
 			continue // Skip self
 		}
 
-		// Create node using helper for proper initialization
-		node := NewNodeWithID(nodeInfo.NodeID, nodeInfo.Address, nodeInfo.Port, nodeInfo.ClusterID)
+		// Create remote-node bookkeeping (no per-peer OVC goroutine).
+		node := newRemoteNode(nodeInfo.NodeID, nodeInfo.Address, nodeInfo.Port, nodeInfo.ClusterID)
 		node.LastHeartbeat.Store(nodeInfo.LastHeartbeat)
 		node.IsAlive.Store(nodeInfo.IsAlive)
 		node.CurrentTerm.Store(nodeInfo.CurrentTerm)
@@ -327,8 +326,8 @@ func (cm *ClusterManager) handleNodeUpdate(msg *Message) error {
 	}
 
 	if update.Joined {
-		// New node joined - add it to our node list using helper
-		node := NewNodeWithID(update.Node.NodeID, update.Node.Address, update.Node.Port, update.Node.ClusterID)
+		// New node joined - add remote-node bookkeeping (no per-peer OVC goroutine).
+		node := newRemoteNode(update.Node.NodeID, update.Node.Address, update.Node.Port, update.Node.ClusterID)
 		node.CurrentTerm.Store(update.Node.CurrentTerm)
 
 		// Connect to new node
