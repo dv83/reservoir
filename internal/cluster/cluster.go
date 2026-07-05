@@ -51,6 +51,10 @@ type ClusterManager struct {
 	voters      map[UUIDv7]struct{}
 	votersMu    sync.Mutex
 	electionWon atomic.Bool
+	// leaderTerm is the term for which the currently-recorded leader was
+	// accepted, used to reject a second node claiming leadership in the same
+	// term (which would otherwise flap LeaderID).
+	leaderTerm atomic.Uint64
 
 	// Replication queue (inspired by DragonflyDB's approach)
 	replicationQueue   chan ReplicationEvent
@@ -354,6 +358,7 @@ func (cm *ClusterManager) becomeLeader() {
 	}
 	cm.localNode.SetState(StateLeader)
 	cm.localNode.LeaderID.Store(&cm.localNode.NodeID)
+	cm.leaderTerm.Store(cm.localNode.CurrentTerm.Load())
 
 	logger.Info("Became leader for term %d", cm.localNode.CurrentTerm.Load())
 

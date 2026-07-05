@@ -23,9 +23,15 @@ func (cm *ClusterManager) handleHeartbeat(msg *Message) error {
 		return nil
 	}
 
-	// Update node state while still holding lock
+	// Update node state while still holding lock. Advance the peer's recorded
+	// term monotonically — never regress it if a heartbeat carries a lower term.
 	node.UpdateHeartbeat()
-	node.CurrentTerm.Store(hb.Term)
+	for {
+		cur := node.CurrentTerm.Load()
+		if hb.Term <= cur || node.CurrentTerm.CompareAndSwap(cur, hb.Term) {
+			break
+		}
+	}
 
 	// OPTIMIZED: Update vector clocks asynchronously (non-blocking)
 	for nodeID, clock := range hb.VectorClock {
@@ -43,14 +49,41 @@ func (cm *ClusterManager) handleHeartbeat(msg *Message) error {
 		currentTerm = hb.Term
 	}
 
-	// If from leader with valid term, accept as leader and reset election timer
-	// Raft invariant: only accept leader if their term >= our term
+	// If from a leader with a valid term, accept it and reset the election timer.
+	// Raft invariant: only accept a leader whose term >= our term. Additionally,
+	// never let a second node claim leadership for a term we already assigned to
+	// a different leader (that would flap LeaderID between two "leaders").
 	if hb.State == StateLeader && hb.Term >= currentTerm {
-		cm.localNode.LeaderID.Store(&hb.NodeID)
-		cm.resetElectionTimer()
+		lt := cm.leaderTerm.Load()
+		curLeader, haveLeader := cm.currentLeaderID()
+		switch {
+		case hb.Term > lt || !haveLeader:
+			cm.localNode.LeaderID.Store(&hb.NodeID)
+			cm.leaderTerm.Store(hb.Term)
+			cm.resetElectionTimer()
+		case hb.Term == lt && curLeader == hb.NodeID:
+			// Same leader, same term: an ordinary heartbeat — keep the timer alive.
+			cm.resetElectionTimer()
+		default:
+			logger.Warning("Ignoring conflicting leader claim from %s for term %d (current leader for that term is %s)",
+				hb.NodeID, hb.Term, curLeader)
+		}
 	}
 
 	return nil
+}
+
+// currentLeaderID returns the currently-recorded leader node ID, if any.
+func (cm *ClusterManager) currentLeaderID() (UUIDv7, bool) {
+	v := cm.localNode.LeaderID.Load()
+	if v == nil {
+		return UUIDv7{}, false
+	}
+	id, ok := v.(*UUIDv7)
+	if !ok || id == nil {
+		return UUIDv7{}, false
+	}
+	return *id, true
 }
 
 // handleJoinRequest processes join requests
