@@ -81,6 +81,19 @@ func New(cfg *config.Config) (*Server, error) {
 			case "INCR", "INCRBY", "DECR", "DECRBY":
 				// Value contains the final result after increment/decrement
 				return kvStore.Set(string(entry.Key), string(entry.Value))
+			case "EXPIRE":
+				// Value is the absolute expiry time (unix nanoseconds). The SET
+				// that created the key has an earlier timestamp and is replayed
+				// first, so the key exists by the time this is applied.
+				nano, err := strconv.ParseInt(string(entry.Value), 10, 64)
+				if err != nil {
+					return nil // skip a corrupt expiry entry rather than abort recovery
+				}
+				kvStore.SetExpiry(string(entry.Key), time.Unix(0, nano))
+				return nil
+			case "PERSIST":
+				kvStore.RemoveExpiry(string(entry.Key))
+				return nil
 			case "FLUSHALL", "FLUSHDB":
 				// Clear all data
 				kvStore.Clear()

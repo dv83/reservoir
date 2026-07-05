@@ -30,14 +30,17 @@ type replicatingHandler func(store.KVStore, *protocol.ZeroCopyCommand, *bufio.Wr
 // never reached). Keeping one table eliminates that whole class of bug.
 var replicatingHandlers = map[string]replicatingHandler{
 	// Strings
-	"SET":    commands.HandleZeroCopySetWithReplication,
-	"DEL":    commands.HandleZeroCopyDelWithReplication,
-	"MSET":   commands.HandleZeroCopyMSetWithReplication,
-	"APPEND": commands.HandleZeroCopyAppendWithReplication,
-	"INCR":   commands.HandleZeroCopyIncrWithReplication,
-	"DECR":   commands.HandleZeroCopyDecrWithReplication,
-	"INCRBY": commands.HandleZeroCopyIncrByWithReplication,
-	"DECRBY": commands.HandleZeroCopyDecrByWithReplication,
+	"SET":     commands.HandleZeroCopySetWithReplication,
+	"DEL":     commands.HandleZeroCopyDelWithReplication,
+	"MSET":    commands.HandleZeroCopyMSetWithReplication,
+	"APPEND":  commands.HandleZeroCopyAppendWithReplication,
+	"GETSET":  commands.HandleZeroCopyGetSetWithReplication,
+	"INCR":    commands.HandleZeroCopyIncrWithReplication,
+	"DECR":    commands.HandleZeroCopyDecrWithReplication,
+	"EXPIRE":  commands.HandleZeroCopyExpireWithReplication,
+	"PERSIST": commands.HandleZeroCopyPersistWithReplication,
+	"INCRBY":  commands.HandleZeroCopyIncrByWithReplication,
+	"DECRBY":  commands.HandleZeroCopyDecrByWithReplication,
 	// Sets
 	"SADD":       commands.HandleZeroCopySAddWithReplication,
 	"SREM":       commands.HandleZeroCopySRemWithReplication,

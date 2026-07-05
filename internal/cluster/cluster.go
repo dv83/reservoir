@@ -44,6 +44,13 @@ type ClusterManager struct {
 	votesReceived    atomic.Uint32
 	electionTerm     atomic.Uint64
 	votesNeeded      atomic.Uint32
+	// voters tracks the distinct nodes that granted a vote in the current
+	// election, so duplicate VoteResponses (retries, duplicate connections)
+	// cannot be double-counted. electionWon ensures becomeLeader runs at most
+	// once per election even if several responses cross the majority threshold.
+	voters      map[UUIDv7]struct{}
+	votersMu    sync.Mutex
+	electionWon atomic.Bool
 
 	// Replication queue (inspired by DragonflyDB's approach)
 	replicationQueue   chan ReplicationEvent
@@ -119,6 +126,7 @@ func NewClusterManager(address string, port int, clusterID UUIDv7) *ClusterManag
 		failedEvents:     make(map[string]*FailedReplicationEvent),
 		retryQueue:       make(chan *FailedReplicationEvent, 10000),
 		cachedTime:       types.NewCachedTimestamp(),
+		voters:           make(map[UUIDv7]struct{}),
 		stopCh:           make(chan struct{}),
 	}
 
@@ -296,6 +304,10 @@ func (cm *ClusterManager) startElection() {
 	cm.localNode.VotedFor.Store(&cm.localNode.NodeID)
 	cm.votesReceived.Store(1) // Self vote
 	cm.electionTerm.Store(currentTerm)
+	cm.electionWon.Store(false)
+	cm.votersMu.Lock()
+	cm.voters = map[UUIDv7]struct{}{cm.localNode.NodeID: {}}
+	cm.votersMu.Unlock()
 
 	// Reset election timer
 	cm.resetElectionTimer()
@@ -333,8 +345,13 @@ func (cm *ClusterManager) startElection() {
 	// which will call becomeLeader() when majority is reached
 }
 
-// becomeLeader transitions to leader state
+// becomeLeader transitions to leader state. It is idempotent within a single
+// election: the first caller wins the CAS and proceeds, any concurrent or later
+// caller for the same election returns immediately.
 func (cm *ClusterManager) becomeLeader() {
+	if !cm.electionWon.CompareAndSwap(false, true) {
+		return
+	}
 	cm.localNode.SetState(StateLeader)
 	cm.localNode.LeaderID.Store(&cm.localNode.NodeID)
 

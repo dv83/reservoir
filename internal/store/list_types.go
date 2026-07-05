@@ -541,8 +541,8 @@ func (sv *StoredValue) Release() {
 // ListValue represents a Redis-compatible list
 // ListValue represents a Redis-compatible list using a deque for O(1) push/pop
 type ListValue struct {
-	deque *Deque        `json:"-"`
-	mu    sync.RWMutex  `json:"-"`
+	deque *Deque       `json:"-"`
+	mu    sync.RWMutex `json:"-"`
 }
 
 // Elements returns the list elements as a slice (for JSON serialization)
@@ -850,9 +850,14 @@ func (sv *StoredValue) TrackReplication(nodes ...string) {
 	sv.ReplicationAttempts++
 }
 
-// MemoryUsage returns the estimated memory usage of the stored value
+// MemoryUsage returns the estimated memory usage of the stored value.
+//
+// Lists are mutated in place without maintaining the cached memorySize (unlike
+// sets and hashes, which update it on every mutation), so for a list we always
+// recompute the current size rather than trusting a stale cache. This keeps the
+// delete paths — which free MemoryUsage() — accurate as a list grows and shrinks.
 func (sv *StoredValue) MemoryUsage() int64 {
-	if sv.memorySize > 0 {
+	if sv.Type != ValueTypeList && sv.memorySize > 0 {
 		return sv.memorySize
 	}
 
@@ -865,6 +870,8 @@ func (sv *StoredValue) MemoryUsage() int64 {
 		if sv.ListVal != nil {
 			size += sv.ListVal.MemoryUsage()
 		}
+		// Do not cache: the list changes in place.
+		return size
 	case ValueTypeSet:
 		if sv.SetVal != nil {
 			size += sv.SetVal.MemoryUsage()

@@ -42,8 +42,10 @@ func (s *LockFreeStore) SAdd(key string, members ...string) (int64, error) {
 		storedSet := NewStoredSet()
 		storedSet.SetVal = setValue
 
-		// Calculate memory usage
-		memoryDelta := storedSet.MemoryUsage() + int64(len(key))
+		// Calculate memory usage. Use MemoryUsage() only (no key length), so
+		// creation and the generic Delete path — which frees MemoryUsage() —
+		// are symmetric, matching lists and hashes.
+		memoryDelta := storedSet.MemoryUsage()
 		newMemory := atomic.LoadInt64(&s.totalMemory) + memoryDelta
 
 		if newMemory > s.limits.MaxMemoryUsage {
@@ -103,10 +105,9 @@ func (s *LockFreeStore) SRem(key string, members ...string) (int64, error) {
 	// If set becomes empty, delete the key
 	if setValue.IsEmpty() {
 		delete(shard.data, key)
-		// Free the value and the key length, symmetric with SAdd's create path
-		// (which charges MemoryUsage()+len(key)). Subtracting only
-		// MemoryUsage() leaked len(key) bytes of accounted memory per set.
-		freed := storedValue.MemoryUsage() + int64(len(key))
+		// Free MemoryUsage() only, symmetric with SAdd's create path and the
+		// generic Delete path (which also frees MemoryUsage()).
+		freed := storedValue.MemoryUsage()
 		atomic.AddInt64(&shard.keyCount, -1)
 		atomic.AddInt64(&s.totalKeys, -1)
 		atomic.AddInt64(&shard.memoryUsage, -freed)

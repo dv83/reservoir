@@ -268,6 +268,16 @@ func (vc *OptimizedVectorClock) GetSnapshot() map[[16]byte]uint64 {
 	return snapshot
 }
 
+// ClockRelation describes the causal relationship between two vector clocks.
+type ClockRelation int
+
+const (
+	ClockBefore ClockRelation = iota
+	ClockAfter
+	ClockConcurrent
+	ClockEqual
+)
+
 // Compare compares this vector clock with another (for consistency checks)
 func (vc *OptimizedVectorClock) Compare(other *OptimizedVectorClock) ClockRelation {
 	// Get snapshots for consistent comparison

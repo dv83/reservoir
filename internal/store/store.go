@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -211,7 +212,9 @@ func (s *LockFreeStore) DeleteFast(key string) bool {
 	keyLen := int64(len(key))
 
 	if oldValue != nil {
-		memoryDelta := -(keyLen + oldValue.memorySize) // Використовуємо кешоване значення
+		// Use MemoryUsage() rather than the raw memorySize field: for a list the
+		// cached field is not maintained on in-place mutation, so it would be stale.
+		memoryDelta := -(keyLen + oldValue.MemoryUsage())
 		s.asyncMetrics.AddMemoryUpdate(shardIdx, memoryDelta)
 		oldValue.Release() // Повертаємо до pool
 	}
@@ -357,7 +360,7 @@ func (s *LockFreeStore) deleteExpiredAsync(shard *LockFreeShard, key string) {
 		keyLen := int64(len(key))
 		shardIdx := int(FastHash(key) & s.shardMask)
 		if oldValue != nil {
-			memoryDelta := -(keyLen + oldValue.memorySize)
+			memoryDelta := -(keyLen + oldValue.MemoryUsage())
 			s.asyncMetrics.AddMemoryUpdate(shardIdx, memoryDelta)
 			oldValue.Release()
 		}
@@ -401,6 +404,16 @@ func (s *LockFreeStore) SetWithExpiry(key, value string, ttl time.Duration) erro
 	return nil
 }
 
+// logToCommitLog appends an operation to the commit log when it is active and we
+// are not currently replaying recovery.
+func (s *LockFreeStore) logToCommitLog(op string, key, value []byte) {
+	if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {
+		if cl, ok := s.commitLog.(CommitLogger); ok {
+			cl.Write(op, key, value)
+		}
+	}
+}
+
 // SetExpiry - встановлення expiry для існуючого ключа
 func (s *LockFreeStore) SetExpiry(key string, expireTime time.Time) bool {
 	shard := s.getShard(key)
@@ -414,6 +427,8 @@ func (s *LockFreeStore) SetExpiry(key string, expireTime time.Time) bool {
 		shard.expiryMu.Lock()
 		shard.expiry[key] = expireTime
 		shard.expiryMu.Unlock()
+		// Persist the TTL as an absolute deadline so it survives a restart.
+		s.logToCommitLog("EXPIRE", []byte(key), []byte(strconv.FormatInt(expireTime.UnixNano(), 10)))
 		return true
 	}
 	return false
@@ -449,6 +464,7 @@ func (s *LockFreeStore) RemoveExpiry(key string) bool {
 	// Check if key exists and has expiry
 	if _, exists := shard.expiry[key]; exists {
 		delete(shard.expiry, key)
+		s.logToCommitLog("PERSIST", []byte(key), nil)
 		return true
 	}
 	return false
