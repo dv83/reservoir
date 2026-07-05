@@ -1,6 +1,9 @@
 package commands
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestExpireAndTTLSemantics covers the newly-wired EXPIRE command and the
 // corrected TTL/PTTL return semantics.
@@ -30,6 +33,50 @@ func TestExpireAndTTLSemantics(t *testing.T) {
 
 	// PTTL must report milliseconds (roughly 100_000 ms) and be positive.
 	tc.expectContains(tc.exec("PTTL", "k"), ":", "PTTL returns an integer")
+}
+
+// TestSetOptions covers the EX/PX/NX/XX/KEEPTTL modifiers of SET.
+func TestSetOptions(t *testing.T) {
+	tc := newTestContext(t)
+	defer tc.cleanup()
+
+	// SET k v EX 100 sets a positive TTL.
+	tc.expectContains(tc.exec("SET", "k", "v", "EX", "100"), "+OK", "SET EX succeeds")
+	if resp := tc.exec("TTL", "k"); resp == ":-1\r\n" || resp == ":-2\r\n" {
+		t.Errorf("TTL after SET EX = %q, want positive", resp)
+	}
+
+	// SET k v2 NX must fail (key exists) and leave the value unchanged.
+	if resp := tc.exec("SET", "k", "v2", "NX"); resp != "$-1\r\n" {
+		t.Errorf("SET NX on existing key = %q, want $-1", resp)
+	}
+	tc.expectContains(tc.exec("GET", "k"), "v", "value unchanged after failed NX")
+
+	// A plain SET (no KEEPTTL) clears the TTL.
+	tc.exec("SET", "k", "v3")
+	if resp := tc.exec("TTL", "k"); resp != ":-1\r\n" {
+		t.Errorf("TTL after plain SET = %q, want :-1 (cleared)", resp)
+	}
+
+	// SET ... XX on a missing key fails.
+	if resp := tc.exec("SET", "missing", "v", "XX"); resp != "$-1\r\n" {
+		t.Errorf("SET XX on missing key = %q, want $-1", resp)
+	}
+
+	// SET k v4 XX succeeds (key exists).
+	tc.expectContains(tc.exec("SET", "k", "v4", "XX"), "+OK", "SET XX on existing key succeeds")
+
+	// KEEPTTL preserves an existing TTL.
+	tc.exec("SET", "t", "v", "EX", "100")
+	tc.exec("SET", "t", "v2", "KEEPTTL")
+	if resp := tc.exec("TTL", "t"); resp == ":-1\r\n" || resp == ":-2\r\n" {
+		t.Errorf("TTL after SET KEEPTTL = %q, want preserved positive", resp)
+	}
+
+	// Bad expire time is a syntax/argument error.
+	if resp := tc.exec("SET", "k", "v", "EX", "0"); !strings.HasPrefix(resp, "-") {
+		t.Errorf("SET EX 0 = %q, want error", resp)
+	}
 }
 
 // TestWrongTypeReplyFormat verifies WRONGTYPE errors use the RESP "-WRONGTYPE"

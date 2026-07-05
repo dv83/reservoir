@@ -9,6 +9,87 @@ import (
 
 // OPTIMIZED String operations for maximum performance - direct implementation
 
+// SetOptions carries the optional modifiers of the Redis SET command.
+type SetOptions struct {
+	NX      bool          // only set if the key does not already exist
+	XX      bool          // only set if the key already exists
+	SetTTL  bool          // apply TTL
+	TTL     time.Duration // expiry to apply when SetTTL is true
+	KeepTTL bool          // preserve the key's existing TTL instead of clearing it
+}
+
+// SetWithOptions performs a SET honoring NX/XX and TTL modifiers atomically
+// under the shard lock. It returns whether the write was applied (false when an
+// NX/XX condition was not met).
+func (s *LockFreeStore) SetWithOptions(key, value string, opts SetOptions) (bool, error) {
+	keyLen := int64(len(key))
+	valueLen := int64(len(value))
+	if keyLen > s.limits.MaxKeySize {
+		return false, pkgErrors.NewKeyTooLarge(keyLen, s.limits.MaxKeySize)
+	}
+	if valueLen > s.limits.MaxValueSize {
+		return false, pkgErrors.NewValueTooLarge(valueLen, s.limits.MaxValueSize)
+	}
+
+	keyCopy := string([]byte(key))
+	valueCopy := string([]byte(value))
+	storedValue := &StoredValue{
+		Type:       ValueTypeString,
+		StringVal:  valueCopy,
+		memorySize: keyLen + valueLen,
+	}
+
+	hash := FastHash(key)
+	shard := s.shards[int(hash&s.shardMask)]
+
+	var memoryDelta int64
+	shard.mu.Lock()
+	oldValue, existed := shard.data[keyCopy]
+
+	// Evaluate NX/XX preconditions inside the lock so the check and the write
+	// are atomic.
+	if (opts.NX && existed) || (opts.XX && !existed) {
+		shard.mu.Unlock()
+		return false, nil
+	}
+
+	if existed && oldValue != nil {
+		memoryDelta = storedValue.memorySize - oldValue.memorySize
+	} else {
+		memoryDelta = storedValue.memorySize
+	}
+	shard.data[keyCopy] = storedValue
+
+	// TTL handling, all under the shard lock (consistent with the expiry cleaner):
+	//   - SetTTL   -> apply the new expiry
+	//   - KeepTTL  -> leave any existing expiry untouched
+	//   - neither  -> a plain SET clears any existing TTL
+	if opts.SetTTL {
+		shard.expiryMu.Lock()
+		shard.expiry[keyCopy] = time.Now().Add(opts.TTL)
+		shard.expiryMu.Unlock()
+	} else if !opts.KeepTTL && existed {
+		shard.expiryMu.Lock()
+		delete(shard.expiry, keyCopy)
+		shard.expiryMu.Unlock()
+	}
+	shard.mu.Unlock()
+
+	if !existed {
+		atomic.AddInt64(&s.totalKeys, 1)
+	}
+	atomic.AddInt64(&shard.memoryUsage, memoryDelta)
+	atomic.AddInt64(&s.totalMemory, memoryDelta)
+
+	if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {
+		if cl, ok := s.commitLog.(CommitLogger); ok {
+			cl.Write("SET", []byte(key), []byte(value))
+		}
+	}
+
+	return true, nil
+}
+
 // Set stores a string value at the given key - OPTIMIZED HOT PATH
 func (s *LockFreeStore) Set(key, value string) error {
 	keyLen := int64(len(key))

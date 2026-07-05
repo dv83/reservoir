@@ -18,6 +18,7 @@ type KVStore interface {
 
 	// Основні операції
 	Set(key, value string) error
+	SetWithOptions(key, value string, opts SetOptions) (bool, error)
 	Get(key string) (string, bool)
 	Delete(key string) bool
 	Clear()

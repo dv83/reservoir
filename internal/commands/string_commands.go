@@ -2,6 +2,9 @@ package commands
 
 import (
 	"bufio"
+	"strconv"
+	"strings"
+	"time"
 
 	"reservoir/internal/protocol"
 	"reservoir/internal/store"
@@ -36,8 +39,8 @@ func HandleZeroCopyGet(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, wri
 
 // HandleZeroCopySetWithReplication processes SET command - ULTRA OPTIMIZED HOT PATH
 func HandleZeroCopySetWithReplication(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, writer *bufio.Writer, replicate ReplicationCallback) error {
-	// ULTRA FAST PATH: Skip ParseSetCommand, work directly with raw command
-	if cmd.ArgCount() != 2 {
+	argc := cmd.ArgCount()
+	if argc < 2 {
 		return writeError(writer, "wrong number of arguments for 'set' command")
 	}
 
@@ -45,18 +48,70 @@ func HandleZeroCopySetWithReplication(kvStore store.KVStore, cmd *protocol.ZeroC
 	key := expandRandomTemplates(cmd.ArgString(0))
 	value := expandRandomTemplates(cmd.ArgString(1))
 
-	if err := kvStore.Set(key, value); err != nil {
-		return writeError(writer, err.Error())
+	// ULTRA FAST PATH: plain "SET key value" with no options.
+	if argc == 2 {
+		if err := kvStore.Set(key, value); err != nil {
+			return writeError(writer, err.Error())
+		}
+		if replicate != nil {
+			replicate("SET", key, []byte(value))
+		}
+		_, err := writer.Write(okResponse)
+		return err
 	}
 
-	// OPTIMIZED: Minimal replication tracking
+	// Parse optional modifiers: EX <sec> | PX <ms> | NX | XX | KEEPTTL.
+	var opts store.SetOptions
+	for i := 2; i < argc; i++ {
+		switch strings.ToUpper(cmd.ArgString(i)) {
+		case "NX":
+			opts.NX = true
+		case "XX":
+			opts.XX = true
+		case "KEEPTTL":
+			opts.KeepTTL = true
+		case "EX", "PX":
+			isMillis := strings.EqualFold(cmd.ArgString(i), "PX")
+			if i+1 >= argc {
+				return writeError(writer, "syntax error")
+			}
+			n, err := strconv.ParseInt(cmd.ArgString(i+1), 10, 64)
+			if err != nil || n <= 0 {
+				return writeError(writer, "invalid expire time in 'set' command")
+			}
+			opts.SetTTL = true
+			if isMillis {
+				opts.TTL = time.Duration(n) * time.Millisecond
+			} else {
+				opts.TTL = time.Duration(n) * time.Second
+			}
+			i++ // consume the numeric argument
+		default:
+			return writeError(writer, "syntax error")
+		}
+	}
+	if opts.NX && opts.XX {
+		return writeError(writer, "syntax error")
+	}
+	if opts.SetTTL && opts.KeepTTL {
+		return writeError(writer, "syntax error")
+	}
+
+	applied, err := kvStore.SetWithOptions(key, value, opts)
+	if err != nil {
+		return writeError(writer, err.Error())
+	}
+	if !applied {
+		// NX/XX condition not met: Redis replies with a null bulk string.
+		_, err := writer.Write(nullResponse)
+		return err
+	}
+
 	if replicate != nil {
-		// REMOVED: Expensive GetStoredValue() and TrackReplication() calls
-		// Just replicate the command - background process handles tracking
 		replicate("SET", key, []byte(value))
 	}
 
-	_, err := writer.Write(okResponse)
+	_, err = writer.Write(okResponse)
 	return err
 }
 
