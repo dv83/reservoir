@@ -158,35 +158,55 @@ func (ebp *ExpiryBatchProcessor) removeExpiryDirect(shard *LockFreeShard, key st
 	shard.expiryMu.Unlock()
 }
 
-// deleteExpiredDirect deletes expired key from store and expiry map directly
+// deleteExpiredDirect deletes expired key from store and expiry map directly.
+//
+// The deletion is queued by the cleaner and processed up to a flush interval
+// later. In that window a SET may have rewritten the key and cleared or renewed
+// its TTL, so we MUST re-verify the key is still present and still expired
+// inside the critical section — otherwise we would destroy a fresh value and
+// drop the new TTL.
 func (ebp *ExpiryBatchProcessor) deleteExpiredDirect(shard *LockFreeShard, key string) {
-	// Delete from main store
+	// Check the value and its TTL, and remove both, all under the single shard
+	// lock. SET clears/renews the expiry under this same lock, so holding it
+	// across the check-and-delete makes the two operations serialize: if the key
+	// was rewritten we observe the cleared/renewed expiry and leave it alone.
 	shard.mu.Lock()
 	oldValue, existed := shard.data[key]
+
+	stillExpired := false
 	if existed {
+		shard.expiryMu.RLock()
+		exp, hasExp := shard.expiry[key]
+		shard.expiryMu.RUnlock()
+		stillExpired = hasExp && time.Now().After(exp)
+	}
+
+	if stillExpired {
 		delete(shard.data, key)
+		shard.expiryMu.Lock()
+		delete(shard.expiry, key)
+		shard.expiryMu.Unlock()
 	}
 	shard.mu.Unlock()
 
-	if existed && ebp.store != nil {
+	// Only mutate accounting when we actually reaped the key. If the key was
+	// renewed we leave both its value and its new TTL intact.
+	if !stillExpired {
+		return
+	}
+
+	if ebp.store != nil {
 		keyLen := int64(len(key))
 		shardIdx := int(FastHash(key) & ebp.store.shardMask)
 
-		// Update metrics asynchronously
 		if oldValue != nil {
 			memoryDelta := -(keyLen + oldValue.memorySize)
 			ebp.store.asyncMetrics.AddMemoryUpdate(shardIdx, memoryDelta)
 			oldValue.Release()
 		}
 
-		// Update key count
 		ebp.store.asyncMetrics.AddKeyUpdate(shardIdx, -1)
 	}
-
-	// Remove from expiry map
-	shard.expiryMu.Lock()
-	delete(shard.expiry, key)
-	shard.expiryMu.Unlock()
 }
 
 // Stop stops the batch processor

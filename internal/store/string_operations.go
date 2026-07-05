@@ -46,6 +46,16 @@ func (s *LockFreeStore) Set(key, value string) error {
 		memoryDelta = storedValue.memorySize
 	}
 	shard.data[keyCopy] = storedValue
+	// A plain SET clears any previous TTL on the key (Redis semantics).
+	// Clearing it under the same shard lock that guards the data keeps the
+	// (value, expiry) pair consistent for the expiry cleaner, which likewise
+	// checks both under shard.mu. Leaving a stale expiry attached would let the
+	// cleaner later reap the freshly-written value (e.g. SETEX k / DEL k / SET k).
+	if existed {
+		shard.expiryMu.Lock()
+		delete(shard.expiry, keyCopy)
+		shard.expiryMu.Unlock()
+	}
 	shard.mu.Unlock()
 
 	// Update counters
@@ -54,21 +64,6 @@ func (s *LockFreeStore) Set(key, value string) error {
 	}
 	atomic.AddInt64(&shard.memoryUsage, memoryDelta)
 	atomic.AddInt64(&s.totalMemory, memoryDelta)
-
-	// A plain SET clears any previous TTL on the key (Redis semantics).
-	// Leaving a stale expiry attached would let the cleaner later delete the
-	// freshly-written value (e.g. SETEX k / DEL k / SET k). Probe under a read
-	// lock first so the common no-TTL path stays a single lock + map miss.
-	if existed {
-		shard.expiryMu.RLock()
-		_, hadExpiry := shard.expiry[keyCopy]
-		shard.expiryMu.RUnlock()
-		if hadExpiry {
-			shard.expiryMu.Lock()
-			delete(shard.expiry, keyCopy)
-			shard.expiryMu.Unlock()
-		}
-	}
 
 	// ASYNC: Commit log in background (if enabled AND not in recovery mode)
 	if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {

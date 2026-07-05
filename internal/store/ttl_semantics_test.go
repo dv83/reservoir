@@ -63,6 +63,37 @@ func TestSetClearsTTL(t *testing.T) {
 	}
 }
 
+// TestExpiredDeletionSkipsRenewedKey reproduces the race where a key is queued
+// for expired-deletion but then rewritten before the deletion runs: the fresh
+// value must survive.
+func TestExpiredDeletionSkipsRenewedKey(t *testing.T) {
+	s := createTestStore()
+	shard := s.getShardFast("k")
+
+	// Create a key whose TTL is already in the past and queue its deletion,
+	// exactly as the cleaner would.
+	if err := s.Set("k", "old"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	shard.expiryMu.Lock()
+	shard.expiry["k"] = time.Now().Add(-time.Second)
+	shard.expiryMu.Unlock()
+
+	// A SET lands before the queued deletion is processed: it rewrites the
+	// value and (plain SET) clears the TTL.
+	if err := s.Set("k", "fresh"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	// Now the stale deletion fires. It must be a no-op because the key is no
+	// longer expired.
+	s.expiryBatch.deleteExpiredDirect(shard, "k")
+
+	if v, ok := s.Get("k"); !ok || v != "fresh" {
+		t.Fatalf("renewed key destroyed by stale expiry deletion: got (%q,%v), want (\"fresh\",true)", v, ok)
+	}
+}
+
 // TestDeleteRemovesExpiry verifies DEL drops the expiry entry, so recreating
 // the key does not inherit a stale TTL.
 func TestDeleteRemovesExpiry(t *testing.T) {
