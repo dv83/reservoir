@@ -81,8 +81,15 @@ type ReplicationEvent struct {
 	EventID   string    `json:"event_id"` // Unique identifier for deduplication
 }
 
-// FailedReplicationEvent represents a failed replication attempt with retry logic
+// FailedReplicationEvent represents a failed replication attempt with retry logic.
+//
+// A single event is shared between the replication goroutine (which records new
+// failures via trackReplicationFailure) and the retry goroutine (which reschedules
+// and prunes it). All of its mutable fields — FailedNodes, LastAttempt, NextRetry,
+// TotalFailures — must be accessed under mu. mu is never held together with
+// ClusterManager.failedEventsMu, to avoid lock-ordering deadlocks.
 type FailedReplicationEvent struct {
+	mu            sync.Mutex
 	Event         ReplicationEvent
 	FailedNodes   map[UUIDv7]int // Node ID -> failure count
 	LastAttempt   time.Time
@@ -167,10 +174,10 @@ func (cm *ClusterManager) Stop() {
 		cm.localNode.OptimizedVectorClock.Stop()
 	}
 
-	// Close retry queue
-	if cm.retryQueue != nil {
-		close(cm.retryQueue)
-	}
+	// NOTE: deliberately do NOT close(cm.retryQueue). Multiple goroutines send
+	// on it (trackReplicationFailure, handleFailedReplication, processRetryQueue);
+	// closing it before wg.Wait() would panic on a concurrent send and could feed
+	// a nil event into retryLoop. Loops exit via stopCh; the channel is GC'd.
 
 	// Stop persistent queue
 	if cm.persistentQueue != nil {
@@ -470,12 +477,11 @@ func (cm *ClusterManager) sendBatchToIndividualNodes(batch []ReplicationEvent, p
 func (cm *ClusterManager) trackReplicationFailure(event ReplicationEvent, nodeID UUIDv7, err error) {
 	logger.Warning("Replication failed for event %s to node %s: %v", event.EventID, nodeID, err)
 
+	// Map insertion under failedEventsMu; per-event field mutation under the
+	// event's own lock. The two locks are never held simultaneously.
 	cm.failedEventsMu.Lock()
-	defer cm.failedEventsMu.Unlock()
-
 	failedEvent, exists := cm.failedEvents[event.EventID]
 	if !exists {
-		// Create new failed event entry
 		failedEvent = &FailedReplicationEvent{
 			Event:         event,
 			FailedNodes:   make(map[UUIDv7]int),
@@ -486,10 +492,12 @@ func (cm *ClusterManager) trackReplicationFailure(event ReplicationEvent, nodeID
 		}
 		cm.failedEvents[event.EventID] = failedEvent
 	}
+	cm.failedEventsMu.Unlock()
 
-	// Increment failure count for this node
+	failedEvent.mu.Lock()
 	failedEvent.FailedNodes[nodeID]++
 	failedEvent.TotalFailures++
+	failedEvent.mu.Unlock()
 
 	// Schedule for retry
 	select {
@@ -635,10 +643,13 @@ func (cm *ClusterManager) GetReplicationStats() ReplicationStats {
 	cm.failedEventsMu.RLock()
 	failedEventCount := len(cm.failedEvents)
 
-	// Count total failed nodes across all events
+	// Count total failed nodes across all events. FailedNodes is mutated under
+	// each event's own lock, so guard the read with it.
 	totalFailedNodes := 0
 	for _, failedEvent := range cm.failedEvents {
+		failedEvent.mu.Lock()
 		totalFailedNodes += len(failedEvent.FailedNodes)
+		failedEvent.mu.Unlock()
 	}
 	cm.failedEventsMu.RUnlock()
 
@@ -907,7 +918,10 @@ func (cm *ClusterManager) cleanupStaleFailedEvents() {
 // handleFailedReplication processes a failed replication event
 func (cm *ClusterManager) handleFailedReplication(failedEvent *FailedReplicationEvent) {
 	// Check if it's time to retry
-	if time.Now().Before(failedEvent.NextRetry) {
+	failedEvent.mu.Lock()
+	notReady := time.Now().Before(failedEvent.NextRetry)
+	failedEvent.mu.Unlock()
+	if notReady {
 		// Not ready for retry yet, put it back in the queue for later
 		select {
 		case cm.retryQueue <- failedEvent:
@@ -925,37 +939,40 @@ func (cm *ClusterManager) handleFailedReplication(failedEvent *FailedReplication
 		delete(cm.failedEvents, failedEvent.Event.EventID)
 		cm.failedEventsMu.Unlock()
 		logger.Info("Successfully retried replication event: %s", failedEvent.Event.EventID)
-	} else {
-		// Failed again - update retry schedule
-		failedEvent.TotalFailures++
-		failedEvent.LastAttempt = time.Now()
+		return
+	}
 
-		if failedEvent.TotalFailures >= failedEvent.MaxRetries {
-			// Max retries exceeded - log critical error and persist for manual intervention
-			logger.Error("CRITICAL: Max retries exceeded for replication event %s, requiring manual intervention", failedEvent.Event.EventID)
-			if cm.persistentQueue != nil {
-				cm.persistentQueue.Add(failedEvent.Event)
-			}
-
-			// Remove from active retry queue
-			cm.failedEventsMu.Lock()
-			delete(cm.failedEvents, failedEvent.Event.EventID)
-			cm.failedEventsMu.Unlock()
-		} else {
-			// Schedule next retry with exponential backoff
-			backoffDuration := time.Duration(1<<failedEvent.TotalFailures) * time.Second
-			if backoffDuration > 5*time.Minute {
-				backoffDuration = 5 * time.Minute // Cap at 5 minutes
-			}
-			failedEvent.NextRetry = time.Now().Add(backoffDuration)
-
-			// Put back in retry queue
-			select {
-			case cm.retryQueue <- failedEvent:
-			default:
-				logger.Warning("Retry queue full, failed event will be retried in next reconciliation cycle")
-			}
+	// Failed again - update retry schedule under the event lock.
+	failedEvent.mu.Lock()
+	failedEvent.TotalFailures++
+	failedEvent.LastAttempt = time.Now()
+	exceeded := failedEvent.TotalFailures >= failedEvent.MaxRetries
+	if !exceeded {
+		backoffDuration := time.Duration(1<<failedEvent.TotalFailures) * time.Second
+		if backoffDuration > 5*time.Minute {
+			backoffDuration = 5 * time.Minute // Cap at 5 minutes
 		}
+		failedEvent.NextRetry = time.Now().Add(backoffDuration)
+	}
+	failedEvent.mu.Unlock()
+
+	if exceeded {
+		// Max retries exceeded - log critical error and persist for manual intervention
+		logger.Error("CRITICAL: Max retries exceeded for replication event %s, requiring manual intervention", failedEvent.Event.EventID)
+		if cm.persistentQueue != nil {
+			cm.persistentQueue.Add(failedEvent.Event)
+		}
+		cm.failedEventsMu.Lock()
+		delete(cm.failedEvents, failedEvent.Event.EventID)
+		cm.failedEventsMu.Unlock()
+		return
+	}
+
+	// Put back in retry queue
+	select {
+	case cm.retryQueue <- failedEvent:
+	default:
+		logger.Warning("Retry queue full, failed event will be retried in next reconciliation cycle")
 	}
 }
 
@@ -979,40 +996,63 @@ func (cm *ClusterManager) directRetryToFailedNodes(failedEvent *FailedReplicatio
 		Events: []ReplicationEvent{failedEvent.Event},
 	}
 
-	successCount := 0
-
+	// Snapshot the failed-node set under the event lock, then perform the
+	// network sends without holding any lock, then remove the reached nodes.
+	failedEvent.mu.Lock()
+	nodes := make([]UUIDv7, 0, len(failedEvent.FailedNodes))
 	for nodeID := range failedEvent.FailedNodes {
+		nodes = append(nodes, nodeID)
+	}
+	failedEvent.mu.Unlock()
+
+	successCount := 0
+	for _, nodeID := range nodes {
 		if err := cm.transport.Send(nodeID, MsgReplicationPush, push); err != nil {
 			logger.Warning("Direct retry failed for node %s: %v", nodeID, err)
 		} else {
 			successCount++
-			// Remove this node from the failed nodes list
+			failedEvent.mu.Lock()
 			delete(failedEvent.FailedNodes, nodeID)
+			failedEvent.mu.Unlock()
 		}
 	}
 
-	// Consider it successful if we reached at least 50% of previously failed nodes
-	return successCount > 0 && len(failedEvent.FailedNodes) == 0
+	failedEvent.mu.Lock()
+	remaining := len(failedEvent.FailedNodes)
+	failedEvent.mu.Unlock()
+
+	// Consider it successful if we reached all previously failed nodes.
+	return successCount > 0 && remaining == 0
 }
 
 // processRetryQueue processes all pending retries
 func (cm *ClusterManager) processRetryQueue() {
 	cm.failedEventsMu.RLock()
-	pendingRetries := make([]*FailedReplicationEvent, 0, len(cm.failedEvents))
+	candidates := make([]*FailedReplicationEvent, 0, len(cm.failedEvents))
 	for _, failedEvent := range cm.failedEvents {
-		if time.Now().After(failedEvent.NextRetry) {
+		candidates = append(candidates, failedEvent)
+	}
+	cm.failedEventsMu.RUnlock()
+
+	now := time.Now()
+	pendingRetries := make([]*FailedReplicationEvent, 0, len(candidates))
+	for _, failedEvent := range candidates {
+		failedEvent.mu.Lock()
+		due := now.After(failedEvent.NextRetry)
+		failedEvent.mu.Unlock()
+		if due {
 			pendingRetries = append(pendingRetries, failedEvent)
 		}
 	}
-	cm.failedEventsMu.RUnlock()
 
 	// Process pending retries
 	for _, failedEvent := range pendingRetries {
 		select {
 		case cm.retryQueue <- failedEvent:
 		default:
-			// Retry queue full, will be processed in next cycle
-			break
+			// Retry queue full; stop enqueuing and let the next cycle continue.
+			// (A bare `break` here would only break the select, not the loop.)
+			return
 		}
 	}
 }

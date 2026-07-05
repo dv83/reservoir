@@ -12,6 +12,13 @@ import (
 	"reservoir/pkg/logger"
 )
 
+// Transport timeouts bound blocking network operations so a single slow or
+// unreachable peer cannot stall cluster-wide message processing.
+const (
+	transportDialTimeout  = 3 * time.Second
+	transportWriteTimeout = 5 * time.Second
+)
+
 // MessageType represents the type of cluster message
 type MessageType uint8
 
@@ -272,6 +279,11 @@ func (t *Transport) sendMessage(out *outgoingMessage) error {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 
+	// Bound the write so a hung or slow peer cannot block the single sendLoop
+	// goroutine indefinitely (which would stall heartbeats and replication to
+	// every other node and trigger spurious failure detection).
+	_ = conn.conn.SetWriteDeadline(time.Now().Add(transportWriteTimeout))
+
 	if err := conn.encoder.Encode(out.message); err != nil {
 		// Remove failed connection
 		t.connectionsMu.Lock()
@@ -339,7 +351,11 @@ func (t *Transport) processMessage(msg *Message) {
 // ConnectToNode establishes a connection to another node
 func (t *Transport) ConnectToNode(nodeID UUIDv7, address string, port int) error {
 	addr := fmt.Sprintf("%s:%d", address, port)
-	conn, err := net.Dial("tcp", addr)
+	// Use a bounded dial: ConnectToNode is called from message handlers running
+	// on the single processLoop goroutine, so a blocking net.Dial to an
+	// unreachable peer would stall all message processing (heartbeats, votes)
+	// for the full OS TCP timeout (~2 min).
+	conn, err := net.DialTimeout("tcp", addr, transportDialTimeout)
 	if err != nil {
 		return fmt.Errorf("failed to connect to %s: %w", addr, err)
 	}
