@@ -211,7 +211,9 @@ func (s *LockFreeStore) DeleteFast(key string) bool {
 	keyLen := int64(len(key))
 
 	if oldValue != nil {
-		memoryDelta := -(keyLen + oldValue.memorySize) // Використовуємо кешоване значення
+		// Use MemoryUsage() rather than the raw memorySize field: for a list the
+		// cached field is not maintained on in-place mutation, so it would be stale.
+		memoryDelta := -(keyLen + oldValue.MemoryUsage())
 		s.asyncMetrics.AddMemoryUpdate(shardIdx, memoryDelta)
 		oldValue.Release() // Повертаємо до pool
 	}
@@ -357,7 +359,7 @@ func (s *LockFreeStore) deleteExpiredAsync(shard *LockFreeShard, key string) {
 		keyLen := int64(len(key))
 		shardIdx := int(FastHash(key) & s.shardMask)
 		if oldValue != nil {
-			memoryDelta := -(keyLen + oldValue.memorySize)
+			memoryDelta := -(keyLen + oldValue.MemoryUsage())
 			s.asyncMetrics.AddMemoryUpdate(shardIdx, memoryDelta)
 			oldValue.Release()
 		}

@@ -219,6 +219,7 @@ func (s *LockFreeStore) LPop(key string, count int) ([]string, error) {
 
 	list := storedVal.ListVal
 	oldSize := list.MemoryUsage()
+	valSize := storedVal.MemoryUsage() // full value size (incl. overhead) before mutation
 
 	// Modify list in-place
 	result := list.LPop(count)
@@ -229,7 +230,7 @@ func (s *LockFreeStore) LPop(key string, count int) ([]string, error) {
 	// Check if list became empty
 	if list.IsEmpty() {
 		delete(shard.data, key)
-		s.trackDeletedKey(shard, oldSize)
+		s.trackDeletedKey(shard, valSize)
 		return result, nil
 	}
 
@@ -268,6 +269,7 @@ func (s *LockFreeStore) RPop(key string, count int) ([]string, error) {
 
 	list := storedVal.ListVal
 	oldSize := list.MemoryUsage()
+	valSize := storedVal.MemoryUsage() // full value size (incl. overhead) before mutation
 
 	// Modify list in-place
 	result := list.RPop(count)
@@ -278,7 +280,7 @@ func (s *LockFreeStore) RPop(key string, count int) ([]string, error) {
 	// Check if list became empty
 	if list.IsEmpty() {
 		delete(shard.data, key)
-		s.trackDeletedKey(shard, oldSize)
+		s.trackDeletedKey(shard, valSize)
 		return result, nil
 	}
 
@@ -375,11 +377,12 @@ func (s *LockFreeStore) LRem(key string, count int64, element string) (int64, er
 
 	list := storedVal.ListVal
 	oldSize := list.MemoryUsage()
+	valSize := storedVal.MemoryUsage() // full value size (incl. overhead) before mutation
 	removed := list.Remove(count, element)
 
 	if list.IsEmpty() {
 		delete(shard.data, key)
-		s.trackDeletedKey(shard, oldSize)
+		s.trackDeletedKey(shard, valSize)
 		return removed, nil
 	}
 
@@ -406,11 +409,12 @@ func (s *LockFreeStore) LTrim(key string, start, stop int64) error {
 
 	list := storedVal.ListVal
 	oldSize := list.MemoryUsage()
+	valSize := storedVal.MemoryUsage() // full value size (incl. overhead) before mutation
 	list.Trim(start, stop)
 
 	if list.IsEmpty() {
 		delete(shard.data, key)
-		s.trackDeletedKey(shard, oldSize)
+		s.trackDeletedKey(shard, valSize)
 		return nil
 	}
 

@@ -200,7 +200,7 @@ func (ebp *ExpiryBatchProcessor) deleteExpiredDirect(shard *LockFreeShard, key s
 		shardIdx := int(FastHash(key) & ebp.store.shardMask)
 
 		if oldValue != nil {
-			memoryDelta := -(keyLen + oldValue.memorySize)
+			memoryDelta := -(keyLen + oldValue.MemoryUsage())
 			ebp.store.asyncMetrics.AddMemoryUpdate(shardIdx, memoryDelta)
 			oldValue.Release()
 		}

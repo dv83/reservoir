@@ -46,7 +46,7 @@ func (s *LockFreeStore) HSet(key string, fieldValues ...string) (int64, error) {
 		storedHash.HashVal = hashValue
 
 		// Calculate memory usage
-		memoryDelta := storedHash.MemoryUsage() + int64(len(key))
+		memoryDelta := storedHash.MemoryUsage()
 		newMemory := atomic.LoadInt64(&s.totalMemory) + memoryDelta
 
 		if newMemory > s.limits.MaxMemoryUsage {
@@ -313,7 +313,7 @@ func (s *LockFreeStore) HIncrBy(key, field string, increment int64) (int64, erro
 		storedHash.HashVal = hashValue
 
 		// Calculate memory usage
-		memoryDelta := storedHash.MemoryUsage() + int64(len(key))
+		memoryDelta := storedHash.MemoryUsage()
 		newMemory := atomic.LoadInt64(&s.totalMemory) + memoryDelta
 
 		if newMemory > s.limits.MaxMemoryUsage {
@@ -375,7 +375,7 @@ func (s *LockFreeStore) HIncrByFloat(key, field string, increment float64) (floa
 		storedHash.HashVal = hashValue
 
 		// Calculate memory usage
-		memoryDelta := storedHash.MemoryUsage() + int64(len(key))
+		memoryDelta := storedHash.MemoryUsage()
 		newMemory := atomic.LoadInt64(&s.totalMemory) + memoryDelta
 
 		if newMemory > s.limits.MaxMemoryUsage {
