@@ -7,12 +7,6 @@ import (
 	"reservoir/pkg/errors"
 )
 
-// MaxCASRetries is the maximum number of CAS retry attempts before giving up
-const MaxCASRetries = 100
-
-// ErrCASRetryExceeded is returned when CAS retries are exhausted
-var ErrCASRetryExceeded = fmt.Errorf("CAS retry limit exceeded")
-
 // --- Helper methods for reducing code duplication ---
 
 // readValue reads a value from shard with proper locking
@@ -34,46 +28,6 @@ func (s *LockFreeStore) requireList(raw interface{}) (*ListValue, *StoredValue, 
 	}
 	list, _ := storedValue.AsList()
 	return list, storedValue, nil
-}
-
-// casSetValue performs compare-and-swap update
-func (s *LockFreeStore) casSetValue(shard *LockFreeShard, key string, oldVal, newVal *StoredValue) bool {
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-	if currentValue, exists := shard.data[key]; exists && currentValue == oldVal {
-		shard.data[key] = newVal
-		return true
-	}
-	return false
-}
-
-// casDeleteKey performs compare-and-swap delete
-func (s *LockFreeStore) casDeleteKey(shard *LockFreeShard, key string, oldVal *StoredValue) bool {
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-	if currentValue, exists := shard.data[key]; exists && currentValue == oldVal {
-		delete(shard.data, key)
-		return true
-	}
-	return false
-}
-
-// casCreateKey creates new key only if it doesn't exist
-func (s *LockFreeStore) casCreateKey(shard *LockFreeShard, key string, newVal *StoredValue) bool {
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-	if _, exists := shard.data[key]; exists {
-		return false
-	}
-	shard.data[key] = newVal
-	return true
-}
-
-// updateMemoryUsage updates memory metrics for shard
-func (s *LockFreeStore) updateMemoryUsage(shard *LockFreeShard, oldSize, newSize int64) {
-	diff := newSize - oldSize
-	atomic.AddInt64(&shard.memoryUsage, diff)
-	atomic.AddInt64(&s.totalMemory, diff)
 }
 
 // checkValueSize validates value against memory limits
@@ -381,106 +335,99 @@ func (s *LockFreeStore) LIndex(key string, index int64) (string, bool, error) {
 	return value, ok, nil
 }
 
-// LSet sets the element at index in a list
+// LSet sets the element at index in a list.
+//
+// Modifies the list in place under the shard write lock, consistent with the
+// push/pop paths. A previous version copied the list and swapped it in with a
+// pointer-comparing CAS, but the push paths mutate the list in place without
+// changing the *StoredValue pointer, so a concurrent push would pass the CAS
+// pointer check and be silently discarded by the swap.
 func (s *LockFreeStore) LSet(key string, index int64, element string) error {
 	shard := s.getShard(key)
 
-	for retries := 0; retries < MaxCASRetries; retries++ {
-		raw, exists := s.readValue(shard, key)
-		if !exists {
-			return fmt.Errorf("no such key")
-		}
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-		list, oldVal, err := s.requireList(raw)
-		if err != nil {
-			return err
-		}
-
-		newList := list.Copy()
-		if !newList.Set(int(index), element) {
-			return fmt.Errorf("index out of range")
-		}
-
-		newVal := newStoredList(newList)
-		if s.casSetValue(shard, key, oldVal, newVal) {
-			s.updateMemoryUsage(shard, oldVal.MemoryUsage(), newVal.MemoryUsage())
-			oldVal.Release()
-			return nil
-		}
+	storedVal, exists := shard.data[key]
+	if !exists {
+		return fmt.Errorf("no such key")
 	}
-	return ErrCASRetryExceeded
+	if storedVal.Type != ValueTypeList {
+		return fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value")
+	}
+
+	list := storedVal.ListVal
+	oldSize := list.MemoryUsage()
+	if !list.Set(int(index), element) {
+		return fmt.Errorf("index out of range")
+	}
+
+	diff := list.MemoryUsage() - oldSize
+	atomic.AddInt64(&shard.memoryUsage, diff)
+	atomic.AddInt64(&s.totalMemory, diff)
+	return nil
 }
 
-// LRem removes elements from a list
+// LRem removes elements from a list (in-place under the shard write lock).
 func (s *LockFreeStore) LRem(key string, count int64, element string) (int64, error) {
 	shard := s.getShard(key)
 
-	for retries := 0; retries < MaxCASRetries; retries++ {
-		raw, exists := s.readValue(shard, key)
-		if !exists {
-			return 0, nil
-		}
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-		list, oldVal, err := s.requireList(raw)
-		if err != nil {
-			return 0, err
-		}
-
-		newList := list.Copy()
-		removed := newList.Remove(count, element)
-
-		if newList.IsEmpty() {
-			if s.casDeleteKey(shard, key, oldVal) {
-				s.trackDeletedKey(shard, oldVal.MemoryUsage())
-				return removed, nil
-			}
-			continue
-		}
-
-		newVal := newStoredList(newList)
-		if s.casSetValue(shard, key, oldVal, newVal) {
-			s.updateMemoryUsage(shard, oldVal.MemoryUsage(), newVal.MemoryUsage())
-			oldVal.Release()
-			return removed, nil
-		}
+	storedVal, exists := shard.data[key]
+	if !exists {
+		return 0, nil
 	}
-	return 0, ErrCASRetryExceeded
+	if storedVal.Type != ValueTypeList {
+		return 0, fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value")
+	}
+
+	list := storedVal.ListVal
+	oldSize := list.MemoryUsage()
+	removed := list.Remove(count, element)
+
+	if list.IsEmpty() {
+		delete(shard.data, key)
+		s.trackDeletedKey(shard, oldSize)
+		return removed, nil
+	}
+
+	diff := list.MemoryUsage() - oldSize
+	atomic.AddInt64(&shard.memoryUsage, diff)
+	atomic.AddInt64(&s.totalMemory, diff)
+	return removed, nil
 }
 
-// LTrim trims a list to the specified range
+// LTrim trims a list to the specified range (in-place under the shard write lock).
 func (s *LockFreeStore) LTrim(key string, start, stop int64) error {
 	shard := s.getShard(key)
 
-	for retries := 0; retries < MaxCASRetries; retries++ {
-		raw, exists := s.readValue(shard, key)
-		if !exists {
-			return nil
-		}
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-		list, oldVal, err := s.requireList(raw)
-		if err != nil {
-			return err
-		}
-
-		newList := list.Copy()
-		newList.Trim(start, stop)
-
-		if newList.IsEmpty() {
-			if s.casDeleteKey(shard, key, oldVal) {
-				s.trackDeletedKey(shard, oldVal.MemoryUsage())
-				return nil
-			}
-			continue
-		}
-
-		newVal := newStoredList(newList)
-		if s.casSetValue(shard, key, oldVal, newVal) {
-			s.updateMemoryUsage(shard, oldVal.MemoryUsage(), newVal.MemoryUsage())
-			oldVal.Release()
-			return nil
-		}
+	storedVal, exists := shard.data[key]
+	if !exists {
+		return nil
 	}
-	return ErrCASRetryExceeded
+	if storedVal.Type != ValueTypeList {
+		return fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value")
+	}
+
+	list := storedVal.ListVal
+	oldSize := list.MemoryUsage()
+	list.Trim(start, stop)
+
+	if list.IsEmpty() {
+		delete(shard.data, key)
+		s.trackDeletedKey(shard, oldSize)
+		return nil
+	}
+
+	diff := list.MemoryUsage() - oldSize
+	atomic.AddInt64(&shard.memoryUsage, diff)
+	atomic.AddInt64(&s.totalMemory, diff)
+	return nil
 }
 
 // LPushX pushes elements only if key exists (O(1) with in-place modification)
