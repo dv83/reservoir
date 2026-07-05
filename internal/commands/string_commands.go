@@ -19,12 +19,19 @@ func HandleZeroCopyGet(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, wri
 	// OPTIMIZED: Direct key access with efficient template expansion
 	key := expandRandomTemplates(cmd.ArgString(0))
 
-	if val, exists := kvStore.Get(key); exists {
-		return writeBulkString(writer, val)
+	// Use GetStoredValue so we can honor TTL (expired keys are treated as
+	// absent) and distinguish a wrong-type key (list/set/hash) from a missing
+	// one, returning WRONGTYPE like every other typed command does instead of
+	// silently replying with an empty string.
+	sv, exists := kvStore.GetStoredValue(key)
+	if !exists {
+		_, err := writer.Write(nullResponse)
+		return err
 	}
-
-	_, err := writer.Write(nullResponse)
-	return err
+	if sv.Type != store.ValueTypeString {
+		return writeError(writer, "WRONGTYPE Operation against a key holding the wrong kind of value")
+	}
+	return writeBulkString(writer, sv.StringVal)
 }
 
 // HandleZeroCopySetWithReplication processes SET command - ULTRA OPTIMIZED HOT PATH

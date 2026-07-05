@@ -497,7 +497,10 @@ func (s *LockFreeStore) GetAllKeys() []string {
 		shard := s.shards[i]
 		shard.mu.RLock()
 		for key := range shard.data {
-			keys = append(keys, key)
+			// Skip expired keys that the cleaner has not physically removed yet.
+			if !s.isExpiredFast(shard, key) {
+				keys = append(keys, key)
+			}
 		}
 		shard.mu.RUnlock()
 	}

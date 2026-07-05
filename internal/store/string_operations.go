@@ -55,6 +55,21 @@ func (s *LockFreeStore) Set(key, value string) error {
 	atomic.AddInt64(&shard.memoryUsage, memoryDelta)
 	atomic.AddInt64(&s.totalMemory, memoryDelta)
 
+	// A plain SET clears any previous TTL on the key (Redis semantics).
+	// Leaving a stale expiry attached would let the cleaner later delete the
+	// freshly-written value (e.g. SETEX k / DEL k / SET k). Probe under a read
+	// lock first so the common no-TTL path stays a single lock + map miss.
+	if existed {
+		shard.expiryMu.RLock()
+		_, hadExpiry := shard.expiry[keyCopy]
+		shard.expiryMu.RUnlock()
+		if hadExpiry {
+			shard.expiryMu.Lock()
+			delete(shard.expiry, keyCopy)
+			shard.expiryMu.Unlock()
+		}
+	}
+
 	// ASYNC: Commit log in background (if enabled AND not in recovery mode)
 	if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {
 		if cl, ok := s.commitLog.(CommitLogger); ok {
@@ -80,6 +95,19 @@ func (s *LockFreeStore) Get(key string) (string, bool) {
 		return "", false
 	}
 
+	// Honor TTL on read: an expired key must not be served even though the
+	// background cleaner has not physically removed it yet.
+	if s.isExpiredFast(shard, key) {
+		return "", false
+	}
+
+	// GET only applies to string values; for any other type the caller must
+	// surface a WRONGTYPE error rather than an empty string. Signal "no string
+	// value here" so the handler can distinguish and report it.
+	if value.Type != ValueTypeString {
+		return "", false
+	}
+
 	return value.StringVal, true
 }
 
@@ -99,6 +127,13 @@ func (s *LockFreeStore) Delete(key string) bool {
 	// ASYNC: Update counters and commit log only if deleted
 	if existed {
 		atomic.AddInt64(&s.totalKeys, -1)
+
+		// Remove any TTL entry synchronously under the same logical delete.
+		// Otherwise the expiry map leaks entries for deleted keys, and a
+		// subsequent recreate of the key would inherit the stale expiry.
+		shard.expiryMu.Lock()
+		delete(shard.expiry, key)
+		shard.expiryMu.Unlock()
 
 		// ASYNC: Commit log in background (if enabled AND not in recovery mode)
 		if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {
@@ -122,7 +157,8 @@ func (s *LockFreeStore) Exists(keys ...string) int64 {
 		_, exists := shard.data[key]
 		shard.mu.RUnlock()
 
-		if exists {
+		// An expired-but-not-yet-collected key must count as absent.
+		if exists && !s.isExpiredFast(shard, key) {
 			count++
 		}
 	}
