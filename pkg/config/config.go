@@ -2,6 +2,7 @@ package config
 
 import (
 	"flag"
+	"os"
 )
 
 // Config holds all configuration for the Reservoir server
@@ -31,6 +32,7 @@ type Config struct {
 	ClusterNodePort  int
 	ClusterSeedNodes string // comma-separated list of seed nodes
 	ClusterID        string // cluster ID (will be auto-generated if empty)
+	ClusterSecret    string // shared secret for HMAC-authenticating inter-node traffic (empty = disabled)
 
 	// Commit Log configuration
 	CommitLogEnabled bool
@@ -95,6 +97,7 @@ func ParseFlags() *Config {
 	clusterNodePort := flag.Int("cluster-node-port", config.ClusterNodePort, "Port for cluster communication")
 	clusterSeedNodes := flag.String("cluster-seed-nodes", config.ClusterSeedNodes, "Comma-separated list of seed nodes (host:port)")
 	clusterID := flag.String("cluster-id", config.ClusterID, "Cluster ID (auto-generated if empty)")
+	clusterSecret := flag.String("cluster-secret", config.ClusterSecret, "Shared secret to HMAC-authenticate inter-node traffic (also RESERVOIR_CLUSTER_SECRET; empty disables auth)")
 
 	// Commit Log flags
 	commitLogEnabled := flag.Bool("commit-log-enabled", config.CommitLogEnabled, "Enable persistent commit log")
@@ -125,6 +128,14 @@ func ParseFlags() *Config {
 	config.ClusterNodePort = *clusterNodePort
 	config.ClusterSeedNodes = *clusterSeedNodes
 	config.ClusterID = *clusterID
+	config.ClusterSecret = *clusterSecret
+	// Allow the secret to come from the environment so it need not appear in the
+	// process arg list. An explicit non-empty flag takes precedence.
+	if config.ClusterSecret == "" {
+		if env := os.Getenv("RESERVOIR_CLUSTER_SECRET"); env != "" {
+			config.ClusterSecret = env
+		}
+	}
 	config.CommitLogEnabled = *commitLogEnabled
 	config.CommitLogDir = *commitLogDir
 

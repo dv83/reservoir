@@ -133,6 +133,13 @@ func NewClusterManager(address string, port int, clusterID UUIDv7) *ClusterManag
 	return cm
 }
 
+// SetAuthKey enables HMAC authentication of inter-node traffic using the given
+// shared secret. Must be called before Start. All nodes in a cluster must use
+// the same secret; an empty secret leaves authentication disabled.
+func (cm *ClusterManager) SetAuthKey(secret string) {
+	cm.transport.SetAuthKey([]byte(secret))
+}
+
 // Start starts the cluster manager
 func (cm *ClusterManager) Start() error {
 	// Start transport

@@ -2,6 +2,9 @@ package cluster
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"io"
@@ -56,6 +59,7 @@ type Message struct {
 	Term      uint64      `json:"term"`
 	Timestamp time.Time   `json:"timestamp"`
 	Payload   []byte      `json:"payload"`
+	Auth      []byte      `json:"auth,omitempty"` // HMAC over (Type,From,Term,Payload) when a cluster secret is configured
 }
 
 // Transport handles network communication between nodes
@@ -78,6 +82,34 @@ type Transport struct {
 	// Control
 	stopCh chan struct{}
 	wg     sync.WaitGroup
+
+	// authKey is the shared cluster secret used to HMAC-authenticate inter-node
+	// messages. When nil, authentication is disabled (backward compatible).
+	authKey []byte
+}
+
+// SetAuthKey enables HMAC authentication of inter-node messages using the given
+// shared secret. Must be called before Start. An empty key leaves auth disabled.
+func (t *Transport) SetAuthKey(key []byte) {
+	if len(key) == 0 {
+		t.authKey = nil
+		return
+	}
+	t.authKey = append([]byte(nil), key...)
+}
+
+// messageMAC computes the HMAC-SHA256 of a message's authenticated fields
+// (Type, From, Term, Payload). To is intentionally excluded so a single
+// signature is valid regardless of the destination.
+func messageMAC(key []byte, msg *Message) []byte {
+	mac := hmac.New(sha256.New, key)
+	var hdr [1 + 16 + 8]byte
+	hdr[0] = byte(msg.Type)
+	copy(hdr[1:17], msg.From[:])
+	binary.BigEndian.PutUint64(hdr[17:25], msg.Term)
+	mac.Write(hdr[:])
+	mac.Write(msg.Payload)
+	return mac.Sum(nil)
 }
 
 // MessageHandler handles a specific message type
@@ -172,6 +204,9 @@ func (t *Transport) Send(destination UUIDv7, msgType MessageType, payload interf
 		Timestamp: time.Now(),
 		Payload:   buf.Bytes(),
 	}
+	if t.authKey != nil {
+		msg.Auth = messageMAC(t.authKey, msg)
+	}
 
 	select {
 	case t.outgoing <- &outgoingMessage{destination: destination, message: msg}:
@@ -236,6 +271,17 @@ func (t *Transport) handleConnection(conn net.Conn) {
 				logger.Debug("Connection read error: %v", err)
 			}
 			return
+		}
+
+		// Reject unauthenticated or forged messages when a cluster secret is
+		// configured. Without this, any client that can reach the cluster port
+		// could inject e.g. a replication FLUSHALL or a node-eviction update.
+		if t.authKey != nil {
+			expected := messageMAC(t.authKey, &msg)
+			if !hmac.Equal(msg.Auth, expected) {
+				logger.Warning("Dropping cluster message with invalid authentication from %s (type %d)", msg.From, msg.Type)
+				continue
+			}
 		}
 
 		// Update stats

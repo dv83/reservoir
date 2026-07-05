@@ -146,6 +146,14 @@ func New(cfg *config.Config) (*Server, error) {
 			clusterID,
 		)
 
+		// Authenticate inter-node traffic if a shared secret was configured.
+		if cfg.ClusterSecret != "" {
+			clusterManager.SetAuthKey(cfg.ClusterSecret)
+			logger.Info("Cluster inter-node authentication enabled")
+		} else {
+			logger.Warning("Cluster secret not set: inter-node traffic is unauthenticated (set --cluster-secret or RESERVOIR_CLUSTER_SECRET)")
+		}
+
 		// Set up replication handler
 		clusterManager.SetReplicationHandler(&StoreReplicationHandler{Store: kvStore})
 
