@@ -21,26 +21,32 @@ func HandleZeroCopyPing(_ store.KVStore, _ *protocol.ZeroCopyCommand, writer *bu
 
 // HandleZeroCopyExpire processes EXPIRE command with zero-copy
 func HandleZeroCopyExpire(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, writer *bufio.Writer) error {
+	return HandleZeroCopyExpireWithReplication(kvStore, cmd, writer, nil)
+}
+
+// HandleZeroCopyExpireWithReplication processes EXPIRE and replicates the change.
+// It replicates the absolute expiry time (unix nanoseconds) rather than the
+// relative seconds, so every replica converges on the same deadline.
+func HandleZeroCopyExpireWithReplication(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, writer *bufio.Writer, replicate ReplicationCallback) error {
 	if cmd.ArgCount() != 2 {
 		return writeError(writer, "wrong number of arguments for 'expire' command")
 	}
 
 	key := expandRandomTemplates(cmd.ArgString(0))
-	secondsStr := cmd.ArgString(1)
-
-	seconds, err := strconv.ParseInt(secondsStr, 10, 64)
+	seconds, err := strconv.ParseInt(cmd.ArgString(1), 10, 64)
 	if err != nil {
 		return writeError(writer, errNotInteger)
 	}
 
 	expireTime := time.Now().Add(time.Duration(seconds) * time.Second)
-	success := kvStore.SetExpiry(key, expireTime)
-
-	if success {
-		return writeInteger(writer, 1)
-	} else {
+	if !kvStore.SetExpiry(key, expireTime) {
 		return writeInteger(writer, 0)
 	}
+
+	if replicate != nil {
+		replicate("EXPIRE", key, []byte(strconv.FormatInt(expireTime.UnixNano(), 10)))
+	}
+	return writeInteger(writer, 1)
 }
 
 // HandleZeroCopyPExpire processes PEXPIRE (TTL in milliseconds) with zero-copy
@@ -105,18 +111,25 @@ func writeTTL(kvStore store.KVStore, writer *bufio.Writer, key string, millis bo
 
 // HandleZeroCopyPersist processes PERSIST command with zero-copy
 func HandleZeroCopyPersist(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, writer *bufio.Writer) error {
+	return HandleZeroCopyPersistWithReplication(kvStore, cmd, writer, nil)
+}
+
+// HandleZeroCopyPersistWithReplication processes PERSIST and replicates the
+// TTL removal to the cluster.
+func HandleZeroCopyPersistWithReplication(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, writer *bufio.Writer, replicate ReplicationCallback) error {
 	if cmd.ArgCount() != 1 {
 		return writeError(writer, "wrong number of arguments for 'persist' command")
 	}
 
 	key := expandRandomTemplates(cmd.ArgString(0))
-	success := kvStore.RemoveExpiry(key)
-
-	if success {
-		return writeInteger(writer, 1)
-	} else {
+	if !kvStore.RemoveExpiry(key) {
 		return writeInteger(writer, 0)
 	}
+
+	if replicate != nil {
+		replicate("PERSIST", key, nil)
+	}
+	return writeInteger(writer, 1)
 }
 
 // HandleZeroCopyKeys processes KEYS command with zero-copy

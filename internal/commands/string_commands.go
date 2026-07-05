@@ -350,6 +350,13 @@ func HandleZeroCopyStrLen(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, 
 
 // HandleZeroCopyGetSet processes GETSET command with zero-copy
 func HandleZeroCopyGetSet(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, writer *bufio.Writer) error {
+	return HandleZeroCopyGetSetWithReplication(kvStore, cmd, writer, nil)
+}
+
+// HandleZeroCopyGetSetWithReplication processes GETSET and replicates the write.
+// GETSET is a mutation (it sets the new value), so it must be propagated to the
+// cluster; it replicates as a plain SET of the new value.
+func HandleZeroCopyGetSetWithReplication(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, writer *bufio.Writer, replicate ReplicationCallback) error {
 	if cmd.ArgCount() != 2 {
 		return writeError(writer, "wrong number of arguments for 'getset' command")
 	}
@@ -362,11 +369,14 @@ func HandleZeroCopyGetSet(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, 
 		return writeError(writer, err.Error())
 	}
 
+	if replicate != nil {
+		replicate("SET", key, []byte(value))
+	}
+
 	// Write response - old value as bulk string or null
 	if hadValue {
 		return writeBulkString(writer, oldValue)
-	} else {
-		_, err = writer.Write(nullResponse)
-		return err
 	}
+	_, err = writer.Write(nullResponse)
+	return err
 }

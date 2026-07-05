@@ -74,7 +74,7 @@ type Transport struct {
 	// Connection pools (inspired by KeyDB's connection management)
 	connections   map[UUIDv7]*nodeConnection
 	addresses     map[UUIDv7]string    // nodeID -> "host:port", for reconnecting after a transient failure
-	lastDial      map[UUIDv7]time.Time  // nodeID -> last redial attempt, to rate-limit reconnection
+	lastDial      map[UUIDv7]time.Time // nodeID -> last redial attempt, to rate-limit reconnection
 	connectionsMu sync.RWMutex
 
 	// Message handlers

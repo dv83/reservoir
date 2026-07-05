@@ -274,6 +274,18 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 			lockFreeStore.CancelDeferredCommand(event.Key)
 		}
 		return nil
+	case "EXPIRE":
+		// Value is the absolute expiry time as unix nanoseconds, so replicas
+		// converge on the same deadline rather than each adding a relative TTL.
+		nano, err := strconv.ParseInt(string(event.Value), 10, 64)
+		if err != nil {
+			return err
+		}
+		h.Store.SetExpiry(event.Key, time.Unix(0, nano))
+		return nil
+	case "PERSIST":
+		h.Store.RemoveExpiry(event.Key)
+		return nil
 	case "FLUSHALL", "FLUSHDB":
 		h.Store.Clear()
 		return nil

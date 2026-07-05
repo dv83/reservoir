@@ -541,8 +541,8 @@ func (sv *StoredValue) Release() {
 // ListValue represents a Redis-compatible list
 // ListValue represents a Redis-compatible list using a deque for O(1) push/pop
 type ListValue struct {
-	deque *Deque        `json:"-"`
-	mu    sync.RWMutex  `json:"-"`
+	deque *Deque       `json:"-"`
+	mu    sync.RWMutex `json:"-"`
 }
 
 // Elements returns the list elements as a slice (for JSON serialization)
