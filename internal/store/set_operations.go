@@ -58,23 +58,20 @@ func (s *LockFreeStore) SAdd(key string, members ...string) (int64, error) {
 		atomic.AddInt64(&s.totalMemory, memoryDelta)
 
 	} else if exists && added > 0 {
-		// Update existing set - create new StoredValue with updated setValue
-		updatedStoredValue := NewStoredSet()
-		updatedStoredValue.SetVal = setValue
+		// The set was modified in place (AsSet returns the live *SetValue held
+		// by the stored value), so the map entry already reflects the additions.
+		// Update its cached memory size and the counters in place, mirroring
+		// SRem. Wrapping it in a fresh StoredValue (as before) reset memorySize
+		// to zero, so the next SAdd computed a negative oldSize and inflated
+		// totalMemory on every call.
+		storedValue := shard.data[key]
+		oldSize := storedValue.memorySize - int64(unsafe.Sizeof(*storedValue))
+		newSize := setValue.MemoryUsage()
+		memoryDelta := newSize - oldSize
 
-		// Get the old stored value to calculate memory delta
-		if oldStoredValue, ok := shard.data[key]; ok {
-			oldSize := oldStoredValue.memorySize - int64(unsafe.Sizeof(*oldStoredValue))
-			newSize := setValue.MemoryUsage()
-			memoryDelta := newSize - oldSize
-
-			// Update memory tracking
-			atomic.AddInt64(&shard.memoryUsage, memoryDelta)
-			atomic.AddInt64(&s.totalMemory, memoryDelta)
-		}
-
-		// Store the updated value in the map
-		shard.data[key] = updatedStoredValue
+		storedValue.memorySize = int64(unsafe.Sizeof(*storedValue)) + newSize
+		atomic.AddInt64(&shard.memoryUsage, memoryDelta)
+		atomic.AddInt64(&s.totalMemory, memoryDelta)
 	}
 
 	return added, nil
@@ -106,10 +103,14 @@ func (s *LockFreeStore) SRem(key string, members ...string) (int64, error) {
 	// If set becomes empty, delete the key
 	if setValue.IsEmpty() {
 		delete(shard.data, key)
+		// Free the value and the key length, symmetric with SAdd's create path
+		// (which charges MemoryUsage()+len(key)). Subtracting only
+		// MemoryUsage() leaked len(key) bytes of accounted memory per set.
+		freed := storedValue.MemoryUsage() + int64(len(key))
 		atomic.AddInt64(&shard.keyCount, -1)
 		atomic.AddInt64(&s.totalKeys, -1)
-		atomic.AddInt64(&shard.memoryUsage, -storedValue.MemoryUsage())
-		atomic.AddInt64(&s.totalMemory, -storedValue.MemoryUsage())
+		atomic.AddInt64(&shard.memoryUsage, -freed)
+		atomic.AddInt64(&s.totalMemory, -freed)
 	} else if removed > 0 {
 		// Update memory usage
 		newSize := setValue.MemoryUsage()
