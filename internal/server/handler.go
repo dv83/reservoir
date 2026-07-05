@@ -8,38 +8,64 @@ import (
 
 	"reservoir/internal/commands"
 	"reservoir/internal/protocol"
+	"reservoir/internal/store"
 	"reservoir/pkg/logger"
 )
 
-// Pre-computed write operations map for better performance
-var writeOperations = map[string]bool{
-	"SET":          true,
-	"DEL":          true,
-	"MSET":         true,
-	"SADD":         true,
-	"SREM":         true,
-	"SPOP":         true,
-	"SDIFFSTORE":   true,
-	"LPUSH":        true,
-	"RPUSH":        true,
-	"LPUSHX":       true,
-	"RPUSHX":       true,
-	"LPUSHUNIQUE":  true,
-	"RPUSHUNIQUE":  true,
-	"LPOP":         true,
-	"RPOP":         true,
-	"LSET":         true,
-	"LREM":         true,
-	"LTRIM":        true,
-	"INCR":         true,
-	"DECR":         true,
-	"INCRBY":       true,
-	"DECRBY":       true,
-	"APPEND":       true,
-	"DEFER":        true,
-	"DEFER.CANCEL": true,
-	"FLUSHALL":     true, // Only supported in cluster mode if propagated
-	"FLUSHDB":      true,
+// replicatingHandler is a command handler that also emits replication events
+// for cluster mode via the supplied callback.
+type replicatingHandler func(store.KVStore, *protocol.ZeroCopyCommand, *bufio.Writer, commands.ReplicationCallback) error
+
+// replicatingHandlers is the single source of truth for which commands are
+// writes and how each one replicates. A command present here is a write and is
+// dispatched through its replication-aware handler; everything else is treated
+// as a read and dispatched through the plain registry handler.
+//
+// This replaces an earlier three-way scheme (a writeOperations bool map, a
+// hand-written switch, and a "commands starting with G are reads" heuristic)
+// whose structures had drifted out of sync — INCR/DECR/APPEND/SPOP/LSET/LREM/
+// LTRIM/LPUSHX/RPUSHX/SDIFFSTORE were flagged as writes but had no switch case
+// (so they silently fell back to the non-replicating handler), and the hash
+// commands were the mirror image (switch cases with no map entry, so they were
+// never reached). Keeping one table eliminates that whole class of bug.
+var replicatingHandlers = map[string]replicatingHandler{
+	// Strings
+	"SET":    commands.HandleZeroCopySetWithReplication,
+	"DEL":    commands.HandleZeroCopyDelWithReplication,
+	"MSET":   commands.HandleZeroCopyMSetWithReplication,
+	"APPEND": commands.HandleZeroCopyAppendWithReplication,
+	"INCR":   commands.HandleZeroCopyIncrWithReplication,
+	"DECR":   commands.HandleZeroCopyDecrWithReplication,
+	"INCRBY": commands.HandleZeroCopyIncrByWithReplication,
+	"DECRBY": commands.HandleZeroCopyDecrByWithReplication,
+	// Sets
+	"SADD":       commands.HandleZeroCopySAddWithReplication,
+	"SREM":       commands.HandleZeroCopySRemWithReplication,
+	"SPOP":       commands.HandleZeroCopySPopWithReplication,
+	"SDIFFSTORE": commands.HandleZeroCopySDiffStoreWithReplication,
+	// Lists
+	"LPUSH":       commands.HandleZeroCopyLPushWithReplication,
+	"RPUSH":       commands.HandleZeroCopyRPushWithReplication,
+	"LPUSHX":      commands.HandleZeroCopyLPushXWithReplication,
+	"RPUSHX":      commands.HandleZeroCopyRPushXWithReplication,
+	"LPUSHUNIQUE": commands.HandleZeroCopyLPushUniqueWithReplication,
+	"RPUSHUNIQUE": commands.HandleZeroCopyRPushUniqueWithReplication,
+	"LPOP":        commands.HandleZeroCopyLPopWithReplication,
+	"RPOP":        commands.HandleZeroCopyRPopWithReplication,
+	"LSET":        commands.HandleZeroCopyLSetWithReplication,
+	"LREM":        commands.HandleZeroCopyLRemWithReplication,
+	"LTRIM":       commands.HandleZeroCopyLTrimWithReplication,
+	// Hashes
+	"HSET":         commands.HandleZeroCopyHSetWithReplication,
+	"HMSET":        commands.HandleZeroCopyHMSetWithReplication,
+	"HDEL":         commands.HandleZeroCopyHDelWithReplication,
+	"HINCRBY":      commands.HandleZeroCopyHIncrByWithReplication,
+	"HINCRBYFLOAT": commands.HandleZeroCopyHIncrByFloatWithReplication,
+	// Deferred + admin
+	"DEFER":        commands.HandleZeroCopyDeferWithReplication,
+	"DEFER.CANCEL": commands.HandleZeroCopyDeferCancelWithReplication,
+	"FLUSHALL":     commands.HandleZeroCopyFlushAllWithReplication,
+	"FLUSHDB":      commands.HandleZeroCopyFlushDBWithReplication,
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
@@ -112,7 +138,6 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		// Fast path for most common commands using byte comparison (no string allocation)
 		var handlerErr error
-		var isWriteOp bool
 
 		// GET command (most common read operation) - ultra fast path
 		if cmdLen == 3 &&
@@ -121,7 +146,6 @@ func (s *Server) handleConnection(conn net.Conn) {
 			(cmdBytes[2] == 'T' || cmdBytes[2] == 't') {
 			// Direct GET handling - bypass all overhead
 			handlerErr = commands.HandleZeroCopyGet(s.kvStore, cmd, writer)
-			isWriteOp = false
 			// SET command (most common write operation) - ultra fast path
 		} else if cmdLen == 3 &&
 			(cmdBytes[0] == 'S' || cmdBytes[0] == 's') &&
@@ -129,79 +153,24 @@ func (s *Server) handleConnection(conn net.Conn) {
 			(cmdBytes[2] == 'T' || cmdBytes[2] == 't') {
 			// Direct SET with replication - bypass overhead
 			handlerErr = commands.HandleZeroCopySetWithReplication(s.kvStore, cmd, writer, replicationCallback)
-			isWriteOp = true
 		} else {
 			// Fallback to standard handler lookup for other commands
 			commandName := cmd.String() // Only allocate string when needed
-			handler, exists := s.commandRegistry.GetHandler(commandName)
-			if !exists {
+			upperCmd := strings.ToUpper(commandName)
+
+			if rh, isWrite := replicatingHandlers[upperCmd]; isWrite {
+				// Write command: dispatch through its replication-aware handler
+				// so the mutation is propagated to the cluster.
+				handlerErr = rh(s.kvStore, cmd, writer, replicationCallback)
+			} else if handler, exists := s.commandRegistry.GetHandler(commandName); exists {
+				// Read (or non-replicated) command.
+				handlerErr = handler(s.kvStore, cmd, writer)
+			} else {
 				// Unknown command error
-				if _, writeErr := writer.Write([]byte("-ERR unknown command\r\n")); writeErr != nil {
+				if _, writeErr := writer.Write([]byte("-ERR unknown command '" + commandName + "'\r\n")); writeErr != nil {
 					return // Connection broken
 				}
 				goto skipMonitoring // Skip expensive monitoring for error case
-			}
-
-			// Check if write operation (only when not GET/SET)
-			firstChar := commandName[0]
-			if firstChar == 'g' || firstChar == 'G' {
-				// Most read operations start with 'g' - assume read
-				isWriteOp = false
-				handlerErr = handler(s.kvStore, cmd, writer)
-			} else {
-				// Check writeOperations map only when necessary
-				upperCmd := strings.ToUpper(commandName)
-				isWriteOp = writeOperations[upperCmd]
-
-				if isWriteOp {
-					// Use specific replication handlers
-					switch upperCmd {
-					case "DEL":
-						handlerErr = commands.HandleZeroCopyDelWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "MSET":
-						handlerErr = commands.HandleZeroCopyMSetWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "SADD":
-						handlerErr = commands.HandleZeroCopySAddWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "SREM":
-						handlerErr = commands.HandleZeroCopySRemWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "LPUSH":
-						handlerErr = commands.HandleZeroCopyLPushWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "RPUSH":
-						handlerErr = commands.HandleZeroCopyRPushWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "LPOP":
-						handlerErr = commands.HandleZeroCopyLPopWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "RPOP":
-						handlerErr = commands.HandleZeroCopyRPopWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "HSET":
-						handlerErr = commands.HandleZeroCopyHSetWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "HMSET":
-						handlerErr = commands.HandleZeroCopyHMSetWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "HDEL":
-						handlerErr = commands.HandleZeroCopyHDelWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "HINCRBY":
-						handlerErr = commands.HandleZeroCopyHIncrByWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "HINCRBYFLOAT":
-						handlerErr = commands.HandleZeroCopyHIncrByFloatWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "LPUSHUNIQUE":
-						handlerErr = commands.HandleZeroCopyLPushUniqueWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "RPUSHUNIQUE":
-						handlerErr = commands.HandleZeroCopyRPushUniqueWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "DEFER":
-						handlerErr = commands.HandleZeroCopyDeferWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "DEFER.CANCEL":
-						handlerErr = commands.HandleZeroCopyDeferCancelWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "FLUSHALL":
-						handlerErr = commands.HandleZeroCopyFlushAllWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					case "FLUSHDB":
-						handlerErr = commands.HandleZeroCopyFlushDBWithReplication(s.kvStore, cmd, writer, replicationCallback)
-					default:
-						// Fallback for other write commands
-						handlerErr = handler(s.kvStore, cmd, writer)
-					}
-				} else {
-					// Read operation
-					handlerErr = handler(s.kvStore, cmd, writer)
-				}
 			}
 		}
 

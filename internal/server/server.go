@@ -22,6 +22,12 @@ import (
 	"reservoir/pkg/logger"
 )
 
+// Compile-time assertion that the concrete commit log satisfies the store's
+// CommitLogger interface. If the interface and implementation ever drift again
+// (e.g. a changed method signature), this fails to build instead of silently
+// disabling persistence at runtime via a failed type assertion.
+var _ store.CommitLogger = (*commitlog.CommitLog)(nil)
+
 // Server represents the Reservoir server instance
 type Server struct {
 	cfg               *config.Config

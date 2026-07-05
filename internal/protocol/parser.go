@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"errors"
 	"io"
+	"math"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unsafe"
 )
 
@@ -40,6 +40,11 @@ const MaxBufferSize = 16 * 1024 * 1024
 // Maximum command size (1MB)
 const MaxCommandSize = 1024 * 1024
 
+// MaxArgCount caps the number of elements in a RESP multi-bulk request to
+// prevent an attacker-controlled array header (e.g. "*2000000000\r\n") from
+// triggering a huge allocation and OOM. Matches Redis' proto-max-bulk-len bound.
+const MaxArgCount = 1024 * 1024
+
 // Buffer pool for reusing parser buffers
 var bufferPool = sync.Pool{
 	New: func() interface{} {
@@ -54,23 +59,10 @@ var (
 	poolRejects int64
 )
 
-// Initialize periodic buffer pool cleanup to prevent unbounded growth
-func init() {
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-
-		for range ticker.C {
-			// Force garbage collection of unused buffers
-			// The sync.Pool will be cleared on each GC cycle
-			bufferPool = sync.Pool{
-				New: func() interface{} {
-					return make([]byte, 16384)
-				},
-			}
-		}
-	}()
-}
+// Note: sync.Pool already releases unreferenced buffers on GC cycles, so no
+// manual periodic reset is needed. A previous version reassigned bufferPool
+// from a background goroutine every 5 minutes, which was an unsynchronized data
+// race against GetPooledBuffer/PutPooledBuffer for no benefit.
 
 // GetPooledBuffer gets a buffer from the pool
 func GetPooledBuffer() []byte {
@@ -206,6 +198,10 @@ func (p *ZeroCopyParser) parseRESPArray(reader *bufio.Reader, firstLine []byte) 
 		return nil, errors.New("invalid argument count")
 	}
 
+	if argCount > MaxArgCount {
+		return nil, errors.New("invalid multibulk length")
+	}
+
 	// Pre-allocate args slice
 	args := make([][]byte, argCount)
 
@@ -321,6 +317,10 @@ func (p *ZeroCopyParser) parseNumber(data []byte) (int, error) {
 	for i := start; i < len(data); i++ {
 		if data[i] < '0' || data[i] > '9' {
 			return 0, errors.New("invalid number")
+		}
+		// Guard against integer overflow from an over-long digit string.
+		if result > (math.MaxInt-9)/10 {
+			return 0, errors.New("number out of range")
 		}
 		result = result*10 + int(data[i]-'0')
 	}

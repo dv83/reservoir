@@ -50,7 +50,12 @@ func DefaultConfig() *Config {
 		MaxConnections:      10000,
 		MaxConnectionsPerIP: 10000,
 		ConnectionRateLimit: 10000, // Increased for high-load scenarios
-		UIPort:              ":8080",
+		// Bind the admin/visualization UI to loopback by default. It has no
+		// authentication and exposes key names, sizes, TTLs and cluster
+		// topology, so it must not be reachable from other hosts unless the
+		// operator explicitly opts in (e.g. --ui-port 0.0.0.0:8080 behind a
+		// trusted network or reverse proxy).
+		UIPort: "127.0.0.1:8080",
 
 		ClusterEnabled:   false,
 		ClusterNodeAddr:  "127.0.0.1",

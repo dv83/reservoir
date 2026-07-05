@@ -571,17 +571,29 @@ const indexHTML = `<!DOCTYPE html>
                     const isLocal = node.node_id === data.local_node.node_id;
                     const lastSeen = isLocal ? 'Now' : formatTime(node.last_heartbeat);
 
-                    row.innerHTML = 
-                        '<td>' + node.node_id + (isLocal ? ' <span style="color:var(--text-dim)">(Local)</span>' : '') + '</td>' +
+                    row.innerHTML =
+                        '<td>' + escapeHtml(node.node_id) + (isLocal ? ' <span style="color:var(--text-dim)">(Local)</span>' : '') + '</td>' +
                         '<td><span class="badge ' + (node.is_leader ? 'badge-leader' : 'badge-follower') + '">' + (node.is_leader ? 'Leader' : 'Follower') + '</span></td>' +
                         '<td><span class="badge ' + (node.is_alive ? 'badge-alive' : 'badge-offline') + '">' + (node.is_alive ? 'Alive' : 'Offline') + '</span></td>' +
-                        '<td>' + node.address + ':' + node.port + '</td>' +
-                        '<td>' + lastSeen + '</td>';
+                        '<td>' + escapeHtml(node.address) + ':' + escapeHtml(node.port) + '</td>' +
+                        '<td>' + escapeHtml(lastSeen) + '</td>';
                     tbody.appendChild(row);
                 });
             } catch (e) {
                 console.error("Nodes fetch error:", e);
             }
+        }
+
+        // escapeHtml prevents stored XSS: key names, node IDs and addresses are
+        // fully attacker-controlled (any client can SET an arbitrary key name),
+        // so they must be escaped before being placed into innerHTML.
+        function escapeHtml(s) {
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
 
         function formatTime(isoStr) {
@@ -680,10 +692,10 @@ const indexHTML = `<!DOCTYPE html>
                 tooltip.style.display = 'block';
                 tooltip.style.left = e.clientX + 16 + 'px';
                 tooltip.style.top = e.clientY + 12 + 'px';
-                tooltip.innerHTML = 
-                    '<div style="font-weight:700;margin-bottom:4px;color:#fff">' + node.key + '</div>' +
+                tooltip.innerHTML =
+                    '<div style="font-weight:700;margin-bottom:4px;color:#fff">' + escapeHtml(node.key) + '</div>' +
                     '<div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px">' +
-                    '<span class="stat-label">TYPE</span> <span>' + node.type + '</span>' +
+                    '<span class="stat-label">TYPE</span> <span>' + escapeHtml(node.type) + '</span>' +
                     '<span class="stat-label">SIZE</span> <span>' + formatBytes(node.size) + '</span>' +
                     '<span class="stat-label">TTL</span> <span>' + (node.ttl ? 'Active' : 'No') + '</span>' +
                     '<span class="stat-label">DEFERRED</span> <span>' + (node.deferred ? 'Pending' : 'No') + '</span>' +
