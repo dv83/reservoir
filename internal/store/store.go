@@ -454,6 +454,51 @@ func (s *LockFreeStore) RemoveExpiry(key string) bool {
 	return false
 }
 
+// --- Canonical accounting helpers ---
+//
+// Every mutation must move the four counters together so they never drift:
+// per-shard keyCount/memoryUsage and their global totals totalKeys/totalMemory.
+// Historically different code paths updated different subsets (strings tracked
+// totalKeys but not shard.keyCount; lists did the reverse; Delete forgot memory
+// entirely), so counts and memory diverged over time. Route creates, deletes
+// and in-place size changes through these three helpers.
+
+// accountKeyAdded records a newly created key occupying memSize bytes.
+func (s *LockFreeStore) accountKeyAdded(shard *LockFreeShard, memSize int64) {
+	atomic.AddInt64(&shard.keyCount, 1)
+	atomic.AddInt64(&s.totalKeys, 1)
+	atomic.AddInt64(&shard.memoryUsage, memSize)
+	atomic.AddInt64(&s.totalMemory, memSize)
+}
+
+// accountKeyRemoved records deletion of a key that occupied memSize bytes.
+func (s *LockFreeStore) accountKeyRemoved(shard *LockFreeShard, memSize int64) {
+	atomic.AddInt64(&shard.keyCount, -1)
+	atomic.AddInt64(&s.totalKeys, -1)
+	atomic.AddInt64(&shard.memoryUsage, -memSize)
+	atomic.AddInt64(&s.totalMemory, -memSize)
+}
+
+// accountMemoryDelta records an in-place value size change (no key count change).
+func (s *LockFreeStore) accountMemoryDelta(shard *LockFreeShard, delta int64) {
+	if delta == 0 {
+		return
+	}
+	atomic.AddInt64(&shard.memoryUsage, delta)
+	atomic.AddInt64(&s.totalMemory, delta)
+}
+
+// wouldExceedMemory reports whether accepting a write that grows total memory by
+// delta bytes would push it past the configured MaxMemoryUsage. This implements
+// a "noeviction"-style policy: writes that would exceed the limit are rejected.
+// A non-positive delta (overwrite that shrinks, or a delete) is always allowed.
+func (s *LockFreeStore) wouldExceedMemory(delta int64) bool {
+	if s.limits == nil || s.limits.MaxMemoryUsage <= 0 || delta <= 0 {
+		return false
+	}
+	return atomic.LoadInt64(&s.totalMemory)+delta > s.limits.MaxMemoryUsage
+}
+
 // GetMemoryUsage - отримання загального використання пам'яті
 func (s *LockFreeStore) GetMemoryUsage() int64 {
 	return atomic.LoadInt64(&s.totalMemory)

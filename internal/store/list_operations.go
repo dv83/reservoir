@@ -40,16 +40,12 @@ func (s *LockFreeStore) checkValueSize(size int64) error {
 
 // trackNewKey updates counters when a new key is created
 func (s *LockFreeStore) trackNewKey(shard *LockFreeShard, memSize int64) {
-	atomic.AddInt64(&shard.keyCount, 1)
-	atomic.AddInt64(&shard.memoryUsage, memSize)
-	atomic.AddInt64(&s.totalMemory, memSize)
+	s.accountKeyAdded(shard, memSize)
 }
 
 // trackDeletedKey updates counters when a key is deleted
 func (s *LockFreeStore) trackDeletedKey(shard *LockFreeShard, memSize int64) {
-	atomic.AddInt64(&shard.keyCount, -1)
-	atomic.AddInt64(&shard.memoryUsage, -memSize)
-	atomic.AddInt64(&s.totalMemory, -memSize)
+	s.accountKeyRemoved(shard, memSize)
 }
 
 // newStoredList creates a StoredValue containing a list
@@ -116,10 +112,7 @@ func (s *LockFreeStore) LPush(key string, elements ...string) (int64, error) {
 	shard.data[key] = storedVal
 
 	// Update stats
-	atomic.AddInt64(&s.totalKeys, 1)
-	memSize := storedVal.MemoryUsage()
-	atomic.AddInt64(&shard.memoryUsage, memSize)
-	atomic.AddInt64(&s.totalMemory, memSize)
+	s.trackNewKey(shard, storedVal.MemoryUsage())
 
 	return newLength, nil
 }
@@ -179,10 +172,7 @@ func (s *LockFreeStore) RPush(key string, elements ...string) (int64, error) {
 	shard.data[key] = storedVal
 
 	// Update stats
-	atomic.AddInt64(&s.totalKeys, 1)
-	memSize := storedVal.MemoryUsage()
-	atomic.AddInt64(&shard.memoryUsage, memSize)
-	atomic.AddInt64(&s.totalMemory, memSize)
+	s.trackNewKey(shard, storedVal.MemoryUsage())
 
 	return newLength, nil
 }
@@ -550,10 +540,7 @@ func (s *LockFreeStore) LPushUnique(key string, elements ...string) (int64, erro
 	storedVal := newStoredList(newList)
 	shard.data[key] = storedVal
 
-	atomic.AddInt64(&s.totalKeys, 1)
-	memSize := storedVal.MemoryUsage()
-	atomic.AddInt64(&shard.memoryUsage, memSize)
-	atomic.AddInt64(&s.totalMemory, memSize)
+	s.trackNewKey(shard, storedVal.MemoryUsage())
 
 	return length, nil
 }
@@ -604,10 +591,7 @@ func (s *LockFreeStore) RPushUnique(key string, elements ...string) (int64, erro
 	storedVal := newStoredList(newList)
 	shard.data[key] = storedVal
 
-	atomic.AddInt64(&s.totalKeys, 1)
-	memSize := storedVal.MemoryUsage()
-	atomic.AddInt64(&shard.memoryUsage, memSize)
-	atomic.AddInt64(&s.totalMemory, memSize)
+	s.trackNewKey(shard, storedVal.MemoryUsage())
 
 	return length, nil
 }

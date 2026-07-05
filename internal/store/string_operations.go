@@ -58,6 +58,10 @@ func (s *LockFreeStore) SetWithOptions(key, value string, opts SetOptions) (bool
 	} else {
 		memoryDelta = storedValue.memorySize
 	}
+	if s.wouldExceedMemory(memoryDelta) {
+		shard.mu.Unlock()
+		return false, pkgErrors.NewMemoryLimit(atomic.LoadInt64(&s.totalMemory)+memoryDelta, s.limits.MaxMemoryUsage)
+	}
 	shard.data[keyCopy] = storedValue
 
 	// TTL handling, all under the shard lock (consistent with the expiry cleaner):
@@ -75,11 +79,11 @@ func (s *LockFreeStore) SetWithOptions(key, value string, opts SetOptions) (bool
 	}
 	shard.mu.Unlock()
 
-	if !existed {
-		atomic.AddInt64(&s.totalKeys, 1)
+	if existed {
+		s.accountMemoryDelta(shard, memoryDelta)
+	} else {
+		s.accountKeyAdded(shard, memoryDelta)
 	}
-	atomic.AddInt64(&shard.memoryUsage, memoryDelta)
-	atomic.AddInt64(&s.totalMemory, memoryDelta)
 
 	if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {
 		if cl, ok := s.commitLog.(CommitLogger); ok {
@@ -126,6 +130,12 @@ func (s *LockFreeStore) Set(key, value string) error {
 	} else {
 		memoryDelta = storedValue.memorySize
 	}
+	// Enforce the memory limit before committing the write (noeviction policy):
+	// reject writes that would push total memory past MaxMemoryUsage.
+	if s.wouldExceedMemory(memoryDelta) {
+		shard.mu.Unlock()
+		return pkgErrors.NewMemoryLimit(atomic.LoadInt64(&s.totalMemory)+memoryDelta, s.limits.MaxMemoryUsage)
+	}
 	shard.data[keyCopy] = storedValue
 	// A plain SET clears any previous TTL on the key (Redis semantics).
 	// Clearing it under the same shard lock that guards the data keeps the
@@ -139,12 +149,13 @@ func (s *LockFreeStore) Set(key, value string) error {
 	}
 	shard.mu.Unlock()
 
-	// Update counters
-	if !existed {
-		atomic.AddInt64(&s.totalKeys, 1)
+	// Update counters through the canonical helpers so key count and memory stay
+	// consistent for both new keys and overwrites.
+	if existed {
+		s.accountMemoryDelta(shard, memoryDelta)
+	} else {
+		s.accountKeyAdded(shard, memoryDelta) // memoryDelta == storedValue.memorySize for a new key
 	}
-	atomic.AddInt64(&shard.memoryUsage, memoryDelta)
-	atomic.AddInt64(&s.totalMemory, memoryDelta)
 
 	// ASYNC: Commit log in background (if enabled AND not in recovery mode)
 	if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {
@@ -194,7 +205,7 @@ func (s *LockFreeStore) Delete(key string) bool {
 
 	// MINIMAL CRITICAL SECTION: Check and delete atomically
 	shard.mu.Lock()
-	_, existed := shard.data[key]
+	oldValue, existed := shard.data[key]
 	if existed {
 		delete(shard.data, key)
 	}
@@ -202,7 +213,11 @@ func (s *LockFreeStore) Delete(key string) bool {
 
 	// ASYNC: Update counters and commit log only if deleted
 	if existed {
-		atomic.AddInt64(&s.totalKeys, -1)
+		var freed int64
+		if oldValue != nil {
+			freed = oldValue.MemoryUsage()
+		}
+		s.accountKeyRemoved(shard, freed)
 
 		// Remove any TTL entry synchronously under the same logical delete.
 		// Otherwise the expiry map leaks entries for deleted keys, and a
@@ -275,11 +290,23 @@ func (s *LockFreeStore) IncrBy(key string, increment int64) (int64, error) {
 	}
 	newValueStr := formatInt64Fast(newValue)
 
+	var oldMem int64
+	if exists && storedValue != nil {
+		oldMem = storedValue.MemoryUsage()
+	}
+
 	// Direct string storage - no complex objects
-	shard.data[key] = &StoredValue{
+	newSV := &StoredValue{
 		Type:       ValueTypeString,
 		StringVal:  newValueStr,
 		memorySize: int64(len(key) + len(newValueStr)),
+	}
+	shard.data[key] = newSV
+
+	if exists {
+		s.accountMemoryDelta(shard, newSV.memorySize-oldMem)
+	} else {
+		s.accountKeyAdded(shard, newSV.memorySize)
 	}
 
 	// Write to commit log asynchronously (if not in recovery mode)
@@ -318,21 +345,30 @@ func (s *LockFreeStore) Append(key, value string) (int64, error) {
 	storedValue, exists := shard.data[key]
 	var newValue string
 
+	var oldMem int64
 	if exists && storedValue != nil {
 		// Check if the key holds the wrong type
 		if !storedValue.IsString() {
 			return 0, pkgErrors.ErrWrongType
 		}
+		oldMem = storedValue.MemoryUsage()
 		newValue = storedValue.StringVal + value
 	} else {
 		newValue = value
 	}
 
 	// Direct storage - no complex objects
-	shard.data[key] = &StoredValue{
+	newSV := &StoredValue{
 		Type:       ValueTypeString,
 		StringVal:  newValue,
 		memorySize: int64(len(key) + len(newValue)),
+	}
+	shard.data[key] = newSV
+
+	if exists {
+		s.accountMemoryDelta(shard, newSV.memorySize-oldMem)
+	} else {
+		s.accountKeyAdded(shard, newSV.memorySize)
 	}
 
 	return int64(len(newValue)), nil
@@ -373,19 +409,26 @@ func (s *LockFreeStore) GetSet(key, value string) (string, bool, error) {
 		return "", false, pkgErrors.ErrWrongType
 	}
 
+	var oldMem int64
+	if existed && oldStoredValue != nil {
+		oldMem = oldStoredValue.MemoryUsage()
+	}
+
 	// Direct storage - no complex objects
-	shard.data[key] = &StoredValue{
+	newSV := &StoredValue{
 		Type:       ValueTypeString,
 		StringVal:  value,
 		memorySize: int64(len(key) + len(value)),
 	}
+	shard.data[key] = newSV
 	shard.mu.Unlock()
 
 	if existed && oldStoredValue != nil {
+		s.accountMemoryDelta(shard, newSV.memorySize-oldMem)
 		return oldStoredValue.StringVal, true, nil
-	} else {
-		return "", false, nil
 	}
+	s.accountKeyAdded(shard, newSV.memorySize)
+	return "", false, nil
 }
 
 // parseIntegerStrict parses an integer string strictly, returning error for invalid input
