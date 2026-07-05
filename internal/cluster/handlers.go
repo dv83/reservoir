@@ -45,6 +45,7 @@ func (cm *ClusterManager) handleHeartbeat(msg *Message) error {
 		cm.localNode.CurrentTerm.Store(hb.Term)
 		cm.localNode.SetState(StateFollower)
 		cm.localNode.VotedFor.Store(nil)
+		cm.persistState()
 		cm.resetElectionTimer()
 		currentTerm = hb.Term
 	}
@@ -259,6 +260,10 @@ func (cm *ClusterManager) handleVoteRequest(msg *Message) error {
 		}
 	}
 
+	// Persist the term/vote decision durably BEFORE replying, so a crash cannot
+	// let us grant a second vote in this term after restart.
+	cm.persistState()
+
 	resp := VoteResponse{
 		NodeID:      cm.localNode.NodeID,
 		Term:        currentTerm,
@@ -291,6 +296,7 @@ func (cm *ClusterManager) handleVoteResponse(msg *Message) error {
 		cm.localNode.CurrentTerm.Store(resp.Term)
 		cm.localNode.SetState(StateFollower)
 		cm.localNode.VotedFor.Store(nil)
+		cm.persistState()
 		return nil
 	}
 

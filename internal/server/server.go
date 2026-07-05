@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -169,6 +170,15 @@ func New(cfg *config.Config) (*Server, error) {
 
 		// Set up replication handler
 		clusterManager.SetReplicationHandler(&StoreReplicationHandler{Store: kvStore})
+
+		// Persist Raft voting state so a restarted node cannot vote twice in a
+		// term. Keyed by cluster port so co-located nodes don't share a file.
+		stateDir := "data/cluster"
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			logger.Warning("Could not create cluster state dir %s: %v (raft state will not persist)", stateDir, err)
+		} else {
+			clusterManager.SetStatePath(filepath.Join(stateDir, fmt.Sprintf("raft-state-%d.json", cfg.ClusterNodePort)))
+		}
 
 		logger.Info("Cluster mode enabled: NodeID=%s, ClusterID=%s",
 			clusterManager.GetLocalNode().NodeID, clusterID)

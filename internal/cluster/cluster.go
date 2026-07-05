@@ -2,8 +2,10 @@ package cluster
 
 import (
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,6 +57,10 @@ type ClusterManager struct {
 	// accepted, used to reject a second node claiming leadership in the same
 	// term (which would otherwise flap LeaderID).
 	leaderTerm atomic.Uint64
+	// statePath is where currentTerm/votedFor are persisted so a restarted node
+	// does not vote twice in a term. Empty disables persistence.
+	statePath string
+	stateMu   sync.Mutex
 
 	// Replication queue (inspired by DragonflyDB's approach)
 	replicationQueue   chan ReplicationEvent
@@ -152,8 +158,88 @@ func (cm *ClusterManager) SetAuthKey(secret string) {
 	cm.transport.SetAuthKey([]byte(secret))
 }
 
+// SetStatePath enables persistence of the Raft voting state (currentTerm and
+// votedFor) to the given file. Must be called before Start. An empty path
+// leaves state in memory only (state is then lost on restart).
+func (cm *ClusterManager) SetStatePath(path string) {
+	cm.statePath = path
+}
+
+// raftState is the on-disk persistent voting state.
+type raftState struct {
+	CurrentTerm uint64 `json:"current_term"`
+	VotedFor    []byte `json:"voted_for,omitempty"` // 16 raw UUIDv7 bytes, empty if none
+}
+
+// loadState restores currentTerm/votedFor from disk (best-effort). Called before
+// any election activity so a restarted node resumes at its last durable term.
+func (cm *ClusterManager) loadState() {
+	if cm.statePath == "" {
+		return
+	}
+	data, err := os.ReadFile(cm.statePath)
+	if err != nil {
+		return // no prior state
+	}
+	var st raftState
+	if err := json.Unmarshal(data, &st); err != nil {
+		logger.Warning("Ignoring unreadable raft state file %s: %v", cm.statePath, err)
+		return
+	}
+	cm.localNode.CurrentTerm.Store(st.CurrentTerm)
+	if len(st.VotedFor) == 16 {
+		var id UUIDv7
+		copy(id[:], st.VotedFor)
+		cm.localNode.VotedFor.Store(&id)
+	}
+	logger.Info("Restored persisted raft state: term=%d", st.CurrentTerm)
+}
+
+// persistState durably writes currentTerm/votedFor via a temp file + rename so a
+// crash mid-write cannot corrupt it. Must be called after mutating term or vote
+// and before acting on that decision (e.g. before replying to a vote request).
+func (cm *ClusterManager) persistState() {
+	if cm.statePath == "" {
+		return
+	}
+	st := raftState{CurrentTerm: cm.localNode.CurrentTerm.Load()}
+	if v := cm.localNode.VotedFor.Load(); v != nil {
+		if id, ok := v.(*UUIDv7); ok && id != nil {
+			st.VotedFor = id[:]
+		}
+	}
+	data, err := json.Marshal(st)
+	if err != nil {
+		logger.Error("Failed to marshal raft state: %v", err)
+		return
+	}
+
+	cm.stateMu.Lock()
+	defer cm.stateMu.Unlock()
+	tmp := cm.statePath + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		logger.Error("Failed to write raft state: %v", err)
+		return
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		logger.Error("Failed to write raft state: %v", err)
+		return
+	}
+	_ = f.Sync()
+	_ = f.Close()
+	if err := os.Rename(tmp, cm.statePath); err != nil {
+		logger.Error("Failed to commit raft state: %v", err)
+	}
+}
+
 // Start starts the cluster manager
 func (cm *ClusterManager) Start() error {
+	// Restore persisted voting state before any election activity so a restarted
+	// node resumes at its last durable term and cannot vote twice in it.
+	cm.loadState()
+
 	// Start transport
 	if err := cm.transport.Start(); err != nil {
 		return fmt.Errorf("failed to start transport: %w", err)
@@ -306,6 +392,7 @@ func (cm *ClusterManager) startElection() {
 
 	// Vote for self
 	cm.localNode.VotedFor.Store(&cm.localNode.NodeID)
+	cm.persistState()         // durably record the new term + self-vote before campaigning
 	cm.votesReceived.Store(1) // Self vote
 	cm.electionTerm.Store(currentTerm)
 	cm.electionWon.Store(false)
