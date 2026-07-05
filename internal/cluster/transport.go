@@ -20,6 +20,10 @@ import (
 const (
 	transportDialTimeout  = 3 * time.Second
 	transportWriteTimeout = 5 * time.Second
+	// transportRedialCooldown rate-limits automatic reconnection so a dead peer
+	// is redialed at most once per interval (bounding how often sendMessage can
+	// block the sendLoop on a dial).
+	transportRedialCooldown = 2 * time.Second
 )
 
 // MessageType represents the type of cluster message
@@ -69,6 +73,8 @@ type Transport struct {
 
 	// Connection pools (inspired by KeyDB's connection management)
 	connections   map[UUIDv7]*nodeConnection
+	addresses     map[UUIDv7]string    // nodeID -> "host:port", for reconnecting after a transient failure
+	lastDial      map[UUIDv7]time.Time  // nodeID -> last redial attempt, to rate-limit reconnection
 	connectionsMu sync.RWMutex
 
 	// Message handlers
@@ -135,6 +141,8 @@ func NewTransport(node *Node) *Transport {
 	return &Transport{
 		node:        node,
 		connections: make(map[UUIDv7]*nodeConnection),
+		addresses:   make(map[UUIDv7]string),
+		lastDial:    make(map[UUIDv7]time.Time),
 		handlers:    make(map[MessageType]MessageHandler),
 		incoming:    make(chan *Message, 1000),
 		outgoing:    make(chan *outgoingMessage, 1000),
@@ -348,20 +356,57 @@ func (t *Transport) sendMessage(out *outgoingMessage) error {
 	return nil
 }
 
-// getConnection gets or creates a connection to a node
+// getConnection returns a live connection to a node, reconnecting on demand if
+// a previous connection was dropped by a transient network error.
 func (t *Transport) getConnection(nodeID UUIDv7) (*nodeConnection, error) {
 	t.connectionsMu.RLock()
 	conn, exists := t.connections[nodeID]
 	t.connectionsMu.RUnlock()
-
 	if exists {
 		return conn, nil
 	}
 
-	// Create new connection
-	// In real implementation, we'd need a node registry to get address
-	// For now, returning error
-	return nil, fmt.Errorf("no connection to node %s", nodeID)
+	// No live connection. Reconnect if we know the peer's address and are not
+	// still within the redial cooldown (which prevents dial storms and bounds
+	// how often this can block the caller).
+	t.connectionsMu.Lock()
+	if conn, exists := t.connections[nodeID]; exists { // re-check under write lock
+		t.connectionsMu.Unlock()
+		return conn, nil
+	}
+	addr, known := t.addresses[nodeID]
+	if !known {
+		t.connectionsMu.Unlock()
+		return nil, fmt.Errorf("no connection to node %s", nodeID)
+	}
+	if last, ok := t.lastDial[nodeID]; ok && time.Since(last) < transportRedialCooldown {
+		t.connectionsMu.Unlock()
+		return nil, fmt.Errorf("no connection to node %s (redial on cooldown)", nodeID)
+	}
+	t.lastDial[nodeID] = time.Now()
+	t.connectionsMu.Unlock()
+
+	netConn, err := net.DialTimeout("tcp", addr, transportDialTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("reconnect to %s failed: %w", addr, err)
+	}
+	nc := &nodeConnection{
+		conn:         netConn,
+		encoder:      gob.NewEncoder(netConn),
+		decoder:      gob.NewDecoder(netConn),
+		lastActivity: time.Now(),
+	}
+	t.connectionsMu.Lock()
+	// Another goroutine may have reconnected in the meantime; prefer the existing one.
+	if existing, ok := t.connections[nodeID]; ok {
+		t.connectionsMu.Unlock()
+		netConn.Close()
+		return existing, nil
+	}
+	t.connections[nodeID] = nc
+	t.connectionsMu.Unlock()
+	logger.Info("Reconnected to node %s at %s", nodeID, addr)
+	return nc, nil
 }
 
 // processLoop processes incoming messages
@@ -415,6 +460,9 @@ func (t *Transport) ConnectToNode(nodeID UUIDv7, address string, port int) error
 
 	t.connectionsMu.Lock()
 	t.connections[nodeID] = nc
+	// Remember the address so a connection dropped by a transient network error
+	// can be re-established on demand (see getConnection).
+	t.addresses[nodeID] = addr
 	t.connectionsMu.Unlock()
 
 	logger.Info("Connected to node %s at %s", nodeID, addr)
@@ -431,6 +479,12 @@ func (t *Transport) DisconnectFromNode(nodeID UUIDv7) {
 		delete(t.connections, nodeID)
 		logger.Debug("Disconnected from node %s", nodeID)
 	}
+	// Explicit disconnect (e.g. eviction or leave) is intentional: forget the
+	// address so we do not keep auto-reconnecting. A rejoin re-registers it.
+	// (A transient send error only drops the connection, not the address, so
+	// getConnection can still auto-reconnect in that case.)
+	delete(t.addresses, nodeID)
+	delete(t.lastDial, nodeID)
 }
 
 // GetConnectedNodes returns list of connected node IDs
