@@ -41,6 +41,10 @@ logs/
 .reservoir.pid
 reservoir.pid
 
+# Runtime data directories (commit log segments, per-node state)
+data/
+data-*/
+
 # Coverage files
 coverage.out
 coverage.html

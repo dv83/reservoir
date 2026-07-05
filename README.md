@@ -6,10 +6,10 @@ Reservoir is a high-performance, distributed, Redis-compatible key-value store w
 
 ### Core Functionality
 
-- **Complete Multi-Master Clustering**: True distributed architecture with automatic replication
-- **Full Redis Protocol Compatibility**: Supports all standard Redis commands with 100% compatibility
-- **Complete Data Types Support**: Strings, Lists, and Sets with all Redis operations
-- **Lock-Free Architecture**: 256-shard design with zero-copy parsing for maximum performance
+- **Multi-Master Clustering**: Distributed architecture with asynchronous replication (see [TODO.md](TODO.md) for current consistency limitations)
+- **RESP Protocol**: Speaks the Redis serialization protocol; supports a subset of Redis commands (see the command list below) — not full Redis compatibility
+- **Data Types**: Strings, Lists, Sets and Hashes with their core operations
+- **Sharded Architecture**: 256 RWMutex-sharded store with zero-copy protocol parsing
 - **Memory Management**: Advanced memory management with configurable limits and OOM protection
 - **TTL Support**: Automatic key expiration with lock-free tracking
 - **High Availability**: No single point of failure, automatic leader election and failover
@@ -43,13 +43,16 @@ reservoir/
 │   ├── connection/       # Advanced connection management
 
 │   ├── protocol/         # Zero-copy Redis protocol parser
-│   └── store/            # Lock-free key-value store
+│   ├── commitlog/        # Write-ahead commit log and recovery
+│   ├── server/           # TCP server, connection handling, web UI
+│   └── store/            # Sharded key-value store
 ├── pkg/
 │   ├── config/           # Configuration management
-│   ├── logger/           # Production logging utilities
+│   ├── errors/           # Structured error types
+│   ├── logger/           # Logging utilities
 │   └── types/            # Shared type definitions
 ├── scripts/              # Server and cluster management scripts
-└── docs/                 # Documentation
+└── cmd/reservoir/        # Main application entry point
 ```
 
 ## Quick Start
@@ -339,14 +342,16 @@ Queue  Batch   File     Cleanup
 
 ### Supported Data Types
 
-**Strings (12 commands):** GET, SET, DEL, MGET, MSET, INCR, DECR, etc.
-**Lists (14 commands):** LPUSH, RPUSH, LPOP, RPOP, LRANGE, LPUSHUNIQUE, etc.
-**Sets (10 commands):** SADD, SREM, SMEMBERS, SCARD, SPOP, SDIFF, etc.
-**Hashes (12 commands):** HSET, HGET, HMGET, HDEL, HKEYS, HINCRBY, etc.
-**Deferred (4 commands):** DEFER, DEFER.CANCEL, DEFER.LIST, DEFER.STATS
-**Server (7 commands):** PING, INFO, CONFIG, FLUSHDB, etc.
+**Strings:** GET, SET (with EX/PX/NX/XX/KEEPTTL), DEL, MGET, MSET, INCR, DECR, INCRBY, DECRBY, APPEND, STRLEN, GETSET
+**Lists:** LPUSH, RPUSH, LPUSHX, RPUSHX, LPUSHUNIQUE, RPUSHUNIQUE, LPOP, RPOP, LLEN, LRANGE, LINDEX, LSET, LREM, LTRIM
+**Sets:** SADD, SREM, SMEMBERS, SCARD, SISMEMBER, SPOP, SDIFF, SINTER, SUNION, SDIFFSTORE
+**Hashes:** HSET, HGET, HMGET, HMSET, HDEL, HEXISTS, HLEN, HKEYS, HVALS, HGETALL, HINCRBY, HINCRBYFLOAT
+**Keys / TTL:** EXISTS, TYPE, KEYS (`*` only), EXPIRE, PEXPIRE, TTL, PTTL, PERSIST
+**Deferred:** DEFER, DEFER.CANCEL, DEFER.LIST, DEFER.STATS
+**Server:** PING, INFO, CONFIG, SELECT, FLUSHDB, FLUSHALL
 
-**Total: 55+ Redis-compatible commands**
+Notable gaps vs. Redis: no sorted sets, no SCAN, `KEYS` supports only the `*`
+pattern, and `SET` does not implement the `GET` option.
 
 
 
@@ -364,7 +369,9 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Status
 
-**Current Version**: 2.0.0 (Multi-Master Cluster)
-**Development Status**: Production-ready for distributed deployments
-**Cluster Support**: ✅ Complete multi-master clustering with full replication
-**Performance**: 130,000+ ops/sec with lock-free architecture and zero-copy parsing
+**Development Status**: Experimental. The single-node store is functional, but
+clustering is best-effort asynchronous replication without conflict resolution
+or quorum — treat it as a prototype, not a production HA system. See
+[TODO.md](TODO.md) for known limitations.
+**Performance**: ~100K+ ops/sec single-node in local benchmarks (hardware- and
+workload-dependent).
