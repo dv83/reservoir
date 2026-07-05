@@ -262,10 +262,18 @@ func (cm *ClusterManager) handleVoteResponse(msg *Message) error {
 	}
 
 	if resp.VoteGranted {
-		votes := cm.votesReceived.Add(1)
+		// Count distinct voters so a duplicate VoteResponse from the same node
+		// cannot be counted twice.
+		cm.votersMu.Lock()
+		cm.voters[resp.NodeID] = struct{}{}
+		votes := uint32(len(cm.voters))
+		cm.votersMu.Unlock()
+		cm.votesReceived.Store(votes)
+
 		logger.Debug("Received vote from %s (total: %d, needed: %d)", resp.NodeID, votes, cm.votesNeeded.Load())
 
-		// Check if we have majority
+		// Check if we have majority. becomeLeader is idempotent per election, so
+		// it runs at most once even if several responses cross the threshold.
 		if votes >= cm.votesNeeded.Load() && cm.localNode.GetState() == StateCandidate {
 			cm.becomeLeader()
 		}
