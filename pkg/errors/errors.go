@@ -42,6 +42,7 @@ const (
 	ErrTypeNotFloat
 	ErrTypeIndexOutOfRange
 	ErrTypeSyntaxError
+	ErrTypeIncrDecrOverflow
 )
 
 // String returns the string representation of the error type
@@ -87,6 +88,8 @@ func (et ErrorType) String() string {
 		return "INDEX_OUT_OF_RANGE"
 	case ErrTypeSyntaxError:
 		return "SYNTAX_ERROR"
+	case ErrTypeIncrDecrOverflow:
+		return "INCR_DECR_OVERFLOW"
 	default:
 		return "UNKNOWN"
 	}
@@ -291,8 +294,9 @@ var (
 	ErrWrongType       = New(ErrTypeWrongType, "WRONGTYPE Operation against a key holding the wrong kind of value")
 	ErrNotInteger      = New(ErrTypeNotInteger, "value is not an integer or out of range")
 	ErrNotFloat        = New(ErrTypeNotFloat, "value is not a valid float")
-	ErrIndexOutOfRange = New(ErrTypeIndexOutOfRange, "index out of range")
-	ErrSyntaxError     = New(ErrTypeSyntaxError, "syntax error")
+	ErrIndexOutOfRange  = New(ErrTypeIndexOutOfRange, "index out of range")
+	ErrSyntaxError      = New(ErrTypeSyntaxError, "syntax error")
+	ErrIncrDecrOverflow = New(ErrTypeIncrDecrOverflow, "increment or decrement would overflow")
 )
 
 // Redis error constructors

@@ -1,9 +1,41 @@
 package store
 
 import (
+	"math"
+	"strconv"
 	"testing"
 	"time"
+
+	pkgErrors "reservoir/pkg/errors"
 )
+
+// TestIncrByOverflow verifies INCR/INCRBY rejects a result that would overflow
+// int64 instead of silently wrapping negative.
+func TestIncrByOverflow(t *testing.T) {
+	s := createTestStore()
+
+	if err := s.Set("k", strconv.FormatInt(math.MaxInt64, 10)); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if _, err := s.IncrBy("k", 1); err == nil {
+		t.Fatalf("IncrBy past MaxInt64 returned no error, want overflow")
+	} else if err != pkgErrors.ErrIncrDecrOverflow {
+		t.Fatalf("IncrBy overflow: got %v, want ErrIncrDecrOverflow", err)
+	}
+
+	// The stored value must be untouched after a rejected overflow.
+	if v, _ := s.Get("k"); v != strconv.FormatInt(math.MaxInt64, 10) {
+		t.Fatalf("value changed after rejected overflow: %q", v)
+	}
+
+	// Negative overflow.
+	if err := s.Set("k", strconv.FormatInt(math.MinInt64, 10)); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if _, err := s.IncrBy("k", -1); err != pkgErrors.ErrIncrDecrOverflow {
+		t.Fatalf("negative overflow: got %v, want ErrIncrDecrOverflow", err)
+	}
+}
 
 // TestGetHonorsExpiry verifies that a read does not serve a key whose TTL has
 // already elapsed, even before the background cleaner has removed it.

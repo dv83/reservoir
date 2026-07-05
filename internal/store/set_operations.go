@@ -287,47 +287,40 @@ func (s *LockFreeStore) SInter(keys ...string) ([]string, error) {
 		return []string{}, nil
 	}
 
-	// Collect all sets first
-	sets := make([]*SetValue, 0, len(keys))
-	shards := make([]*LockFreeShard, 0, len(keys))
-
-	// Lock all shards and get sets
+	// Snapshot each set under its own shard lock, one key at a time. The
+	// previous implementation held an RLock on every key's shard at once; when
+	// two keys mapped to the same shard (guaranteed with 256 shards under any
+	// real key set) that took a recursive RLock on one RWMutex, which deadlocks
+	// if a writer queues between the two acquisitions. Copying each set and
+	// releasing immediately avoids holding more than one lock at a time, at the
+	// cost of cross-key atomicity (already the behavior of SUnion/SDiff).
+	snapshots := make([]*SetValue, 0, len(keys))
 	for _, key := range keys {
 		shard := s.getShard(key)
 		shard.mu.RLock()
-		shards = append(shards, shard)
 
-		if storedValue, exists := shard.data[key]; exists {
-			if !storedValue.IsSet() {
-				// Unlock all previously locked shards
-				for _, lockedShard := range shards {
-					lockedShard.mu.RUnlock()
-				}
-				return nil, pkgErrors.ErrWrongType
-			}
-
-			setValue, _ := storedValue.AsSet()
-			sets = append(sets, setValue)
-		} else {
-			// If any set doesn't exist, intersection is empty
-			for _, lockedShard := range shards {
-				lockedShard.mu.RUnlock()
-			}
+		storedValue, exists := shard.data[key]
+		if !exists {
+			// If any set is missing, the intersection is empty.
+			shard.mu.RUnlock()
 			return []string{}, nil
 		}
+		if !storedValue.IsSet() {
+			shard.mu.RUnlock()
+			return nil, pkgErrors.ErrWrongType
+		}
+
+		setValue, _ := storedValue.AsSet()
+		snapshots = append(snapshots, setValue.Copy())
+		shard.mu.RUnlock()
 	}
 
-	// Calculate intersection
-	result := sets[0].Copy()
-	for i := 1; i < len(sets); i++ {
-		intersection := result.Inter(sets[i])
+	// Calculate intersection outside any lock.
+	result := snapshots[0]
+	for i := 1; i < len(snapshots); i++ {
+		intersection := result.Inter(snapshots[i])
 		result = NewSetValue()
 		result.Add(intersection...)
-	}
-
-	// Unlock all shards
-	for _, shard := range shards {
-		shard.mu.RUnlock()
 	}
 
 	return result.Members(), nil

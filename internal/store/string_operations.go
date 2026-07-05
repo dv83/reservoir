@@ -186,8 +186,12 @@ func (s *LockFreeStore) IncrBy(key string, increment int64) (int64, error) {
 		}
 	}
 
-	// Calculate new value and store directly
+	// Calculate new value, detecting signed 64-bit overflow (Redis rejects an
+	// INCR/DECR whose result would wrap) instead of silently wrapping negative.
 	newValue := currentValue + increment
+	if (increment > 0 && newValue < currentValue) || (increment < 0 && newValue > currentValue) {
+		return 0, pkgErrors.ErrIncrDecrOverflow
+	}
 	newValueStr := formatInt64Fast(newValue)
 
 	// Direct string storage - no complex objects
