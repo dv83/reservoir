@@ -126,12 +126,18 @@ func HandleZeroCopyKeys(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, wr
 	}
 
 	pattern := cmd.ArgString(0)
-	if pattern != "*" {
-		// For now, only support wildcard pattern
-		return writeError(writer, "only '*' pattern is supported")
-	}
+	allKeys := kvStore.GetAllKeys()
 
-	keys := kvStore.GetAllKeys()
+	// Fast path for "*" (all keys); otherwise filter by the glob pattern.
+	keys := allKeys
+	if pattern != "*" {
+		keys = keys[:0:0]
+		for _, key := range allKeys {
+			if globMatch(pattern, key) {
+				keys = append(keys, key)
+			}
+		}
+	}
 
 	// Write array header
 	if err := writeArrayStart(writer, len(keys)); err != nil {
