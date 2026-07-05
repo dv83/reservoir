@@ -42,11 +42,12 @@ func TestTransportReconnectsAfterDrop(t *testing.T) {
 	waitAccept(t, accepted, "initial connection")
 
 	// Simulate a transient drop: close and remove the connection but keep the
-	// address (exactly what a send error does).
+	// address (exactly what a send error does via peerSendLoop).
 	tr.connectionsMu.Lock()
-	tr.connections[peer].conn.Close()
+	nc := tr.connections[peer]
 	delete(tr.connections, peer)
 	tr.connectionsMu.Unlock()
+	nc.close()
 
 	// getConnection should transparently reconnect.
 	conn, err := tr.getConnection(peer)

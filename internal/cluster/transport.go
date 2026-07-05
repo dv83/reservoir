@@ -121,13 +121,37 @@ func messageMAC(key []byte, msg *Message) []byte {
 // MessageHandler handles a specific message type
 type MessageHandler func(*Message) error
 
-// nodeConnection represents a connection to another node
+// nodeConnection represents a connection to another node. Each connection owns a
+// bounded send queue drained by its own goroutine, so a slow or hung peer only
+// backs up its own queue instead of blocking sends to every other node.
 type nodeConnection struct {
 	conn         net.Conn
 	encoder      *gob.Encoder
 	decoder      *gob.Decoder
 	lastActivity time.Time
-	mu           sync.Mutex
+	sendQueue    chan *Message
+	stop         chan struct{}
+	stopOnce     sync.Once
+}
+
+// newNodeConnection wraps a raw net.Conn and initializes its per-peer send queue.
+func newNodeConnection(conn net.Conn) *nodeConnection {
+	return &nodeConnection{
+		conn:         conn,
+		encoder:      gob.NewEncoder(conn),
+		decoder:      gob.NewDecoder(conn),
+		lastActivity: time.Now(),
+		sendQueue:    make(chan *Message, 256),
+		stop:         make(chan struct{}),
+	}
+}
+
+// close stops the connection's send worker and closes the socket, exactly once.
+func (nc *nodeConnection) close() {
+	nc.stopOnce.Do(func() {
+		close(nc.stop)
+		_ = nc.conn.Close()
+	})
 }
 
 // outgoingMessage wraps a message with destination info
@@ -178,10 +202,10 @@ func (t *Transport) Stop() {
 		t.listener.Close()
 	}
 
-	// Close all connections
+	// Close all connections (stops their per-peer send workers too).
 	t.connectionsMu.Lock()
 	for _, conn := range t.connections {
-		conn.conn.Close()
+		conn.close()
 	}
 	t.connectionsMu.Unlock()
 
@@ -307,7 +331,9 @@ func (t *Transport) handleConnection(conn net.Conn) {
 	}
 }
 
-// sendLoop sends outgoing messages
+// sendLoop dispatches outgoing messages to per-peer send queues. It never blocks
+// on the actual network write — the connection's own worker (peerSendLoop) does
+// the blocking encode — so one slow peer cannot stall sends to the others.
 func (t *Transport) sendLoop() {
 	defer t.wg.Done()
 
@@ -315,45 +341,50 @@ func (t *Transport) sendLoop() {
 		select {
 		case <-t.stopCh:
 			return
-		case msg := <-t.outgoing:
-			if err := t.sendMessage(msg); err != nil {
-				logger.Error("Failed to send message: %v", err)
+		case out := <-t.outgoing:
+			nc, err := t.getConnection(out.destination)
+			if err != nil {
+				logger.Debug("No route to %s: %v", out.destination, err)
+				continue
+			}
+			select {
+			case nc.sendQueue <- out.message:
+			case <-t.stopCh:
+				return
+			default:
+				logger.Warning("Send queue full for %s, dropping message", out.destination)
 			}
 		}
 	}
 }
 
-// sendMessage sends a single message
-func (t *Transport) sendMessage(out *outgoingMessage) error {
-	conn, err := t.getConnection(out.destination)
-	if err != nil {
-		return err
+// peerSendLoop is the per-connection worker that performs the blocking encode for
+// one peer. On a write error it removes and closes the connection; a later Send
+// will reconnect via getConnection.
+func (t *Transport) peerSendLoop(dest UUIDv7, nc *nodeConnection) {
+	for {
+		select {
+		case <-t.stopCh:
+			return
+		case <-nc.stop:
+			return
+		case msg := <-nc.sendQueue:
+			_ = nc.conn.SetWriteDeadline(time.Now().Add(transportWriteTimeout))
+			if err := nc.encoder.Encode(msg); err != nil {
+				logger.Debug("Send to %s failed: %v", dest, err)
+				t.connectionsMu.Lock()
+				if t.connections[dest] == nc {
+					delete(t.connections, dest)
+				}
+				t.connectionsMu.Unlock()
+				nc.close()
+				return
+			}
+			nc.lastActivity = time.Now()
+			t.node.MessagesSent.Add(1)
+			t.node.BytesSent.Add(uint64(len(msg.Payload)))
+		}
 	}
-
-	conn.mu.Lock()
-	defer conn.mu.Unlock()
-
-	// Bound the write so a hung or slow peer cannot block the single sendLoop
-	// goroutine indefinitely (which would stall heartbeats and replication to
-	// every other node and trigger spurious failure detection).
-	_ = conn.conn.SetWriteDeadline(time.Now().Add(transportWriteTimeout))
-
-	if err := conn.encoder.Encode(out.message); err != nil {
-		// Remove failed connection
-		t.connectionsMu.Lock()
-		delete(t.connections, out.destination)
-		t.connectionsMu.Unlock()
-		conn.conn.Close()
-		return err
-	}
-
-	conn.lastActivity = time.Now()
-
-	// Update stats
-	t.node.MessagesSent.Add(1)
-	t.node.BytesSent.Add(uint64(len(out.message.Payload)))
-
-	return nil
 }
 
 // getConnection returns a live connection to a node, reconnecting on demand if
@@ -390,12 +421,7 @@ func (t *Transport) getConnection(nodeID UUIDv7) (*nodeConnection, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reconnect to %s failed: %w", addr, err)
 	}
-	nc := &nodeConnection{
-		conn:         netConn,
-		encoder:      gob.NewEncoder(netConn),
-		decoder:      gob.NewDecoder(netConn),
-		lastActivity: time.Now(),
-	}
+	nc := newNodeConnection(netConn)
 	t.connectionsMu.Lock()
 	// Another goroutine may have reconnected in the meantime; prefer the existing one.
 	if existing, ok := t.connections[nodeID]; ok {
@@ -405,6 +431,7 @@ func (t *Transport) getConnection(nodeID UUIDv7) (*nodeConnection, error) {
 	}
 	t.connections[nodeID] = nc
 	t.connectionsMu.Unlock()
+	go t.peerSendLoop(nodeID, nc)
 	logger.Info("Reconnected to node %s at %s", nodeID, addr)
 	return nc, nil
 }
@@ -451,19 +478,24 @@ func (t *Transport) ConnectToNode(nodeID UUIDv7, address string, port int) error
 		return fmt.Errorf("failed to connect to %s: %w", addr, err)
 	}
 
-	nc := &nodeConnection{
-		conn:         conn,
-		encoder:      gob.NewEncoder(conn),
-		decoder:      gob.NewDecoder(conn),
-		lastActivity: time.Now(),
-	}
+	nc := newNodeConnection(conn)
 
 	t.connectionsMu.Lock()
+	// If a connection to this node already exists, close the new one and keep the
+	// existing worker rather than orphaning it.
+	if _, ok := t.connections[nodeID]; ok {
+		t.addresses[nodeID] = addr
+		t.connectionsMu.Unlock()
+		conn.Close()
+		logger.Debug("Connection to %s already exists; reusing it", nodeID)
+		return nil
+	}
 	t.connections[nodeID] = nc
 	// Remember the address so a connection dropped by a transient network error
 	// can be re-established on demand (see getConnection).
 	t.addresses[nodeID] = addr
 	t.connectionsMu.Unlock()
+	go t.peerSendLoop(nodeID, nc)
 
 	logger.Info("Connected to node %s at %s", nodeID, addr)
 	return nil
@@ -475,7 +507,7 @@ func (t *Transport) DisconnectFromNode(nodeID UUIDv7) {
 	defer t.connectionsMu.Unlock()
 
 	if nc, exists := t.connections[nodeID]; exists {
-		nc.conn.Close()
+		nc.close() // stops the peer send worker and closes the socket
 		delete(t.connections, nodeID)
 		logger.Debug("Disconnected from node %s", nodeID)
 	}
