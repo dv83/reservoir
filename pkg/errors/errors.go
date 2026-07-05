@@ -296,9 +296,9 @@ func IsConfigError(err error) bool {
 
 // Redis protocol errors - predefined instances for common use
 var (
-	ErrWrongType       = New(ErrTypeWrongType, "WRONGTYPE Operation against a key holding the wrong kind of value")
-	ErrNotInteger      = New(ErrTypeNotInteger, "value is not an integer or out of range")
-	ErrNotFloat        = New(ErrTypeNotFloat, "value is not a valid float")
+	ErrWrongType        = New(ErrTypeWrongType, "WRONGTYPE Operation against a key holding the wrong kind of value")
+	ErrNotInteger       = New(ErrTypeNotInteger, "value is not an integer or out of range")
+	ErrNotFloat         = New(ErrTypeNotFloat, "value is not a valid float")
 	ErrIndexOutOfRange  = New(ErrTypeIndexOutOfRange, "index out of range")
 	ErrSyntaxError      = New(ErrTypeSyntaxError, "syntax error")
 	ErrIncrDecrOverflow = New(ErrTypeIncrDecrOverflow, "increment or decrement would overflow")
