@@ -107,8 +107,13 @@ type ReservoirError struct {
 
 // Error implements the error interface
 func (re *ReservoirError) Error() string {
-	// For Redis protocol compatibility, return just the message for WRONGTYPE errors
-	if re.Type == ErrTypeWrongType {
+	// Redis protocol errors are surfaced verbatim to clients, so their Error()
+	// returns just the bare message (which for WRONGTYPE already embeds its own
+	// error code). Internal storage/network errors keep the structured
+	// "TYPE: message" form for logs.
+	switch re.Type {
+	case ErrTypeWrongType, ErrTypeNotInteger, ErrTypeNotFloat,
+		ErrTypeIndexOutOfRange, ErrTypeSyntaxError, ErrTypeIncrDecrOverflow:
 		return re.Message
 	}
 	if re.Cause != nil {

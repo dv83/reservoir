@@ -245,7 +245,7 @@ func HandleZeroCopyHIncrByWithReplication(kvStore store.KVStore, cmd *protocol.Z
 	// Parse increment
 	increment, err := strconv.ParseInt(incrementStr, 10, 64)
 	if err != nil {
-		return writeError(writer, "ERR "+errNotInteger)
+		return writeError(writer, errNotInteger)
 	}
 
 	result, err := kvStore.HIncrBy(key, field, increment)

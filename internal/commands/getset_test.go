@@ -222,11 +222,11 @@ func TestGetSetErrors(t *testing.T) {
 			response := output.String()
 
 			if tt.expectError {
-				if !strings.Contains(response, "-ERR") || !strings.Contains(response, tt.errorPart) {
+				if !strings.HasPrefix(response, "-") || !strings.Contains(response, tt.errorPart) {
 					t.Errorf("Expected error containing %q, got %q", tt.errorPart, response)
 				}
 			} else {
-				if strings.Contains(response, "-ERR") {
+				if strings.HasPrefix(response, "-") {
 					t.Errorf("Unexpected error: %q", response)
 				}
 			}

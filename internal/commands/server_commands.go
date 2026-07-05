@@ -43,6 +43,27 @@ func HandleZeroCopyExpire(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, 
 	}
 }
 
+// HandleZeroCopyPExpire processes PEXPIRE (TTL in milliseconds) with zero-copy
+func HandleZeroCopyPExpire(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, writer *bufio.Writer) error {
+	if cmd.ArgCount() != 2 {
+		return writeError(writer, "wrong number of arguments for 'pexpire' command")
+	}
+
+	key := expandRandomTemplates(cmd.ArgString(0))
+	millisStr := cmd.ArgString(1)
+
+	millis, err := strconv.ParseInt(millisStr, 10, 64)
+	if err != nil {
+		return writeError(writer, errNotInteger)
+	}
+
+	expireTime := time.Now().Add(time.Duration(millis) * time.Millisecond)
+	if kvStore.SetExpiry(key, expireTime) {
+		return writeInteger(writer, 1)
+	}
+	return writeInteger(writer, 0)
+}
+
 // HandleZeroCopyTTL processes TTL command with zero-copy
 func HandleZeroCopyTTL(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, writer *bufio.Writer) error {
 	if cmd.ArgCount() != 1 {
@@ -50,19 +71,36 @@ func HandleZeroCopyTTL(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, wri
 	}
 
 	key := expandRandomTemplates(cmd.ArgString(0))
-	ttl, hasExpiry := kvStore.GetTTL(key)
+	return writeTTL(kvStore, writer, key, false)
+}
 
-	if !hasExpiry {
-		// Key doesn't exist or has no expiry
-		return writeInteger(writer, -1)
+// HandleZeroCopyPTTL processes PTTL (TTL in milliseconds) with zero-copy
+func HandleZeroCopyPTTL(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, writer *bufio.Writer) error {
+	if cmd.ArgCount() != 1 {
+		return writeError(writer, "wrong number of arguments for 'pttl' command")
 	}
 
-	if ttl <= 0 {
-		// Key has expired
+	key := expandRandomTemplates(cmd.ArgString(0))
+	return writeTTL(kvStore, writer, key, true)
+}
+
+// writeTTL implements Redis TTL/PTTL semantics: -2 if the key does not exist,
+// -1 if it exists but has no associated expiry, otherwise the remaining time
+// (seconds for TTL, milliseconds for PTTL).
+func writeTTL(kvStore store.KVStore, writer *bufio.Writer, key string, millis bool) error {
+	ttl, hasExpiry := kvStore.GetTTL(key)
+	if hasExpiry && ttl > 0 {
+		if millis {
+			return writeInteger(writer, int64(ttl.Milliseconds()))
+		}
+		return writeInteger(writer, int64(ttl.Seconds()))
+	}
+
+	// No live expiry: distinguish a missing key (-2) from a key with no TTL (-1).
+	if kvStore.Exists(key) == 0 {
 		return writeInteger(writer, -2)
 	}
-
-	return writeInteger(writer, int64(ttl.Seconds()))
+	return writeInteger(writer, -1)
 }
 
 // HandleZeroCopyPersist processes PERSIST command with zero-copy

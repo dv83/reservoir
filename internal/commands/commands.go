@@ -124,6 +124,9 @@ func (r *ZeroCopyRegistry) registerCommands() {
 		"MSET":     withNilReplication(HandleZeroCopyMSetWithReplication),
 		"INFO":     HandleZeroCopyInfo,
 		"TTL":      HandleZeroCopyTTL,
+		"PTTL":     HandleZeroCopyPTTL,
+		"EXPIRE":   HandleZeroCopyExpire,
+		"PEXPIRE":  HandleZeroCopyPExpire,
 		"TYPE":     HandleZeroCopyType,
 		"PERSIST":  HandleZeroCopyPersist,
 		"FLUSHDB":  withNilReplication(HandleZeroCopyFlushDBWithReplication),
@@ -357,13 +360,14 @@ var (
 	nullResponse       = []byte("$-1\r\n")
 	emptyArrayResponse = []byte("*0\r\n")
 	errorPrefix        = []byte("-ERR ")
+	errorDash          = []byte("-")
 	errorSuffix        = []byte("\r\n")
 )
 
 // Common error messages
 const (
 	errNotInteger        = "value is not an integer or out of range"
-	errNotFloat          = "ERR value is not a valid float"
+	errNotFloat          = "value is not a valid float"
 	errDeferNotSupported = "deferred commands not supported by this store type"
 	errCommitLogDisabled = "commit log not enabled"
 )
@@ -396,9 +400,32 @@ func parseInteger(s string) (int64, error) {
 
 // Response writing functions
 
-// writeError writes an error response
+// knownErrorCodes are RESP error codes we emit that are their own reply code
+// (rendered as "-CODE message"), rather than the generic "-ERR message". Kept
+// as an explicit allowlist so ordinary messages that merely start with an
+// uppercase word (e.g. "SET command requires ...") are not mistaken for codes.
+var knownErrorCodes = []string{"WRONGTYPE"}
+
+// hasErrorCodePrefix reports whether a message already begins with one of the
+// known RESP error codes followed by a space.
+func hasErrorCodePrefix(message string) bool {
+	for _, code := range knownErrorCodes {
+		if strings.HasPrefix(message, code+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// writeError writes an error response in RESP format ("-<CODE> <message>").
 func writeError(writer *bufio.Writer, message string) error {
-	if _, err := writer.Write(errorPrefix); err != nil {
+	prefix := errorPrefix
+	if hasErrorCodePrefix(message) {
+		// Message carries its own error code (e.g. WRONGTYPE); don't double it
+		// up as "-ERR WRONGTYPE ...".
+		prefix = errorDash
+	}
+	if _, err := writer.Write(prefix); err != nil {
 		return err
 	}
 	if _, err := writer.WriteString(message); err != nil {
