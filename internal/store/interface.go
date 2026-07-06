@@ -92,6 +92,8 @@ type KVStore interface {
 	HGetAll(key string) ([]string, error)
 	HIncrBy(key, field string, increment int64) (int64, error)
 	HIncrByFloat(key, field string, increment float64) (float64, error)
+	HSetLWW(key string, physical int64, logical uint32, origin uint64, fieldValues ...string) (int64, error)
+	HDelLWW(key string, physical int64, logical uint32, origin uint64, fields ...string) (int64, error)
 
 	// Внутрішні методи для роботи з StoredValue
 	SetStoredValue(key string, value *StoredValue) error

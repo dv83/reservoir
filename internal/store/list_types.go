@@ -326,6 +326,12 @@ func (sv *SetValue) Copy() *SetValue {
 type HashValue struct {
 	Fields map[string]string // field-value pairs
 	mu     sync.RWMutex      // For concurrent access safety
+
+	// crdt holds per-field last-write-wins stamps for cluster convergence. It is
+	// nil for hashes only ever touched by the plain (non-cluster) path, and is
+	// created lazily on the first stamped op. When present, Fields is the
+	// materialized view of the CRDT.
+	crdt *lwwHash
 }
 
 // NewHashValue creates a new hash value
@@ -479,6 +485,15 @@ func (hv *HashValue) MemoryUsage() int64 {
 	size := int64(unsafe.Sizeof(*hv))
 	for field, value := range hv.Fields {
 		size += int64(len(field) + len(value))
+	}
+
+	// Field stamps (and any tombstoned fields) add per-field overhead when the
+	// CRDT is active.
+	if hv.crdt != nil {
+		stampSize := int64(unsafe.Sizeof(hlcStamp{}))
+		for field, f := range hv.crdt.fields {
+			size += int64(len(field)+len(f.value)) + stampSize
+		}
 	}
 
 	return size
