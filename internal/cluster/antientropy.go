@@ -99,7 +99,10 @@ func (cm *ClusterManager) handleSyncResponse(msg *Message) error {
 	for _, e := range resp.Entries {
 		var op string
 		value := e.Value
-		if e.Member != "" {
+		if e.Counter {
+			// PN-counter state; apply path max-merges it.
+			op = "COUNTER"
+		} else if e.Member != "" {
 			// Set element: SADD if present, SREM if tombstoned. The apply path
 			// expects the null-separated "key\x00member" encoding.
 			if e.Deleted {

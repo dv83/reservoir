@@ -26,6 +26,9 @@ type SyncEntry struct {
 	HLCLogical  uint32 `json:"hlc_l"`
 	HLCOrigin   uint64 `json:"hlc_o"`
 	Deleted     bool   `json:"deleted,omitempty"`
+	// Counter marks a PN-counter key: Value holds the encoded counter state,
+	// reconciled by max-merge instead of the LWW stamp.
+	Counter bool `json:"counter,omitempty"`
 }
 
 // SyncRequest asks a peer for the LWW digest of one shard.

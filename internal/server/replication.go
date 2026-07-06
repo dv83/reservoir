@@ -55,7 +55,7 @@ func (h *StoreReplicationHandler) LocalDigest(shardIdx int) []cluster.SyncEntry 
 	raw := h.Store.ShardLWWDigest(shardIdx)
 	entries := make([]cluster.SyncEntry, 0, len(raw))
 	for _, e := range raw {
-		entries = append(entries, cluster.SyncEntry{
+		se := cluster.SyncEntry{
 			Key:         e.Key,
 			Member:      e.Member,
 			Value:       []byte(e.Value),
@@ -63,7 +63,18 @@ func (h *StoreReplicationHandler) LocalDigest(shardIdx int) []cluster.SyncEntry 
 			HLCLogical:  e.Logical,
 			HLCOrigin:   e.Origin,
 			Deleted:     e.Deleted,
-		})
+		}
+		if e.Counter != nil {
+			// Carry the counter state as the encoded value; peers max-merge it.
+			if enc, err := encodeCounterState(*e.Counter); err == nil {
+				se.Value = enc
+				se.Counter = true
+			} else {
+				logger.Warning("failed to encode counter digest for %s: %v", e.Key, err)
+				continue
+			}
+		}
+		entries = append(entries, se)
 	}
 	return entries
 }

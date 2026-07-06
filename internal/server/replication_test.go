@@ -85,6 +85,8 @@ func reconcile(into *StoreReplicationHandler, from *StoreReplicationHandler) {
 			var op string
 			value := e.Value
 			switch {
+			case e.Counter:
+				op = "COUNTER"
 			case e.Member != "":
 				if e.Deleted {
 					op = "SREM"
@@ -224,6 +226,36 @@ func TestApplyReplicationSetCRDTConverges(t *testing.T) {
 	// "a" removed at 200 must stay gone; "b" and "c" present.
 	if got := m1; !(len(got) == 2 && got[0] == "b" && got[1] == "c") {
 		t.Fatalf("converged membership = %v, want [b c]", got)
+	}
+}
+
+// TestAntiEntropyReconcilesCounter verifies anti-entropy heals a counter that
+// missed a live COUNTER event: after reconciliation the lagging node reflects
+// the peer's increments, merged with its own.
+func TestAntiEntropyReconcilesCounter(t *testing.T) {
+	sa := newReplTestStore()
+	sa.SetLocalOrigin(0xA)
+	sb := newReplTestStore()
+	sb.SetLocalOrigin(0xB)
+
+	// A did +10 then +5 (peer missed both live). B did its own +2.
+	sa.IncrBy("c", 10)
+	sa.IncrBy("c", 5)
+	sb.IncrBy("c", 2)
+
+	a := &StoreReplicationHandler{Store: sa}
+	b := &StoreReplicationHandler{Store: sb}
+
+	// b pulls a's digest.
+	reconcile(b, a)
+
+	if v, _ := sb.Get("c"); v != "17" {
+		t.Fatalf("after reconcile b = %q, want \"17\" (15 from A + 2 from B)", v)
+	}
+	// Idempotent: a second reconcile changes nothing.
+	reconcile(b, a)
+	if v, _ := sb.Get("c"); v != "17" {
+		t.Fatalf("second reconcile changed b to %q, want \"17\"", v)
 	}
 }
 

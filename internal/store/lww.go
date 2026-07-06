@@ -234,6 +234,9 @@ type LWWShardEntry struct {
 	Logical  uint32
 	Origin   uint64
 	Deleted  bool
+	// Counter, when non-nil, means this entry is a PN-counter key: its state is
+	// reconciled by max-merge rather than by the LWW stamp.
+	Counter *CounterState
 }
 
 // ShardCount returns the number of shards, so callers can iterate them.
@@ -257,10 +260,21 @@ func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
 		}
 		switch v.Type {
 		case ValueTypeString:
-			entries = append(entries, LWWShardEntry{
-				Key: k, Value: v.StringVal,
-				Physical: v.hlc.TS.Physical, Logical: v.hlc.TS.Logical, Origin: v.hlc.Origin,
-			})
+			if v.counter != nil {
+				// A counter key: its authoritative state is the PN-counter, so
+				// emit that (max-merged on the peer) rather than the derived
+				// string value.
+				c := v.counter.clone()
+				entries = append(entries, LWWShardEntry{
+					Key:     k,
+					Counter: &CounterState{Base: c.Base, P: c.P, N: c.N},
+				})
+			} else {
+				entries = append(entries, LWWShardEntry{
+					Key: k, Value: v.StringVal,
+					Physical: v.hlc.TS.Physical, Logical: v.hlc.TS.Logical, Origin: v.hlc.Origin,
+				})
+			}
 		case ValueTypeSet:
 			if v.SetVal != nil {
 				entries = v.SetVal.appendLWWDigest(k, entries)
