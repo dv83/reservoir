@@ -187,6 +187,10 @@ func New(cfg *config.Config) (*Server, error) {
 		// Set up replication handler
 		clusterManager.SetReplicationHandler(&StoreReplicationHandler{Store: kvStore})
 
+		// Give the store this node's origin so INCR/DECR maintain the PN-counter
+		// CRDT for convergent multi-master increments.
+		kvStore.SetLocalOrigin(clusterManager.Origin())
+
 		// Persist Raft voting state so a restarted node cannot vote twice in a
 		// term. Keyed by cluster port so co-located nodes don't share a file.
 		stateDir := "data/cluster"

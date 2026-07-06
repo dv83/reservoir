@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"encoding/gob"
 	"strconv"
 	"strings"
 	"time"
@@ -9,6 +11,23 @@ import (
 	"reservoir/internal/store"
 	"reservoir/pkg/logger"
 )
+
+// encodeCounterState serializes a PN-counter snapshot for the "COUNTER"
+// replication payload.
+func encodeCounterState(st store.CounterState) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(st); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// decodeCounterState parses a "COUNTER" replication payload back into a snapshot.
+func decodeCounterState(value []byte) (store.CounterState, error) {
+	var st store.CounterState
+	err := gob.NewDecoder(bytes.NewReader(value)).Decode(&st)
+	return st, err
+}
 
 // StoreReplicationHandler implements cluster.ReplicationHandler
 type StoreReplicationHandler struct {
@@ -298,7 +317,18 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 			return nil
 		}
 		return h.Store.LTrim(event.Key, start, stop)
+	case "COUNTER":
+		// Convergent PN-counter state: max-merge into the local counter so
+		// concurrent increments from any node are all preserved.
+		st, err := decodeCounterState(event.Value)
+		if err != nil {
+			logger.Warning("Invalid COUNTER replication data for %s: %v", event.Key, err)
+			return nil
+		}
+		_, err = h.Store.MergeCounter(event.Key, st)
+		return err
 	case "INCR", "DECR":
+		// Legacy result-based path (pre-CRDT senders): overwrites the value.
 		return h.Store.Set(event.Key, string(event.Value))
 	case "INCRBY", "DECRBY":
 		parts := strings.Split(string(event.Value), "\x00")

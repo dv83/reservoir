@@ -154,6 +154,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 				p, l, o := s.clusterManager.NextStamp()
 				_, _ = s.kvStore.SRemLWW(key, p, l, o, string(value))
 				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			case "INCR", "DECR", "INCRBY", "DECRBY":
+				// IncrBy already applied the increment into the key's PN-counter.
+				// Replicate the whole counter state so peers converge by max-merge
+				// (never losing a concurrent increment), instead of the old
+				// result-based path that overwrote and lost updates.
+				if st, ok := s.kvStore.CounterState(key); ok {
+					if enc, err := encodeCounterState(st); err == nil {
+						s.clusterManager.QueueReplication("COUNTER", key, enc)
+					} else {
+						logger.Error("failed to encode counter state for %s: %v", key, err)
+					}
+				}
 			default:
 				s.clusterManager.QueueReplication(operation, key, value)
 			}

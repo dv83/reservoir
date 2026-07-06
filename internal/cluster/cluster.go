@@ -118,6 +118,10 @@ func (cm *ClusterManager) NextStamp() (physical int64, logical uint32, origin ui
 	return ts.Physical, ts.Logical, cm.origin
 }
 
+// Origin returns this node's compressed id, used to key its slot in the
+// PN-counter CRDT.
+func (cm *ClusterManager) Origin() uint64 { return cm.origin }
+
 // FailedReplicationEvent represents a failed replication attempt with retry logic.
 //
 // A single event is shared between the replication goroutine (which records new

@@ -227,6 +227,61 @@ func TestApplyReplicationSetCRDTConverges(t *testing.T) {
 	}
 }
 
+// TestApplyReplicationCounterConverges verifies that two nodes' INCR streams,
+// replicated as COUNTER state and applied via ApplyReplication in opposite
+// orders, converge to the summed value with no increment lost.
+func TestApplyReplicationCounterConverges(t *testing.T) {
+	// Node A and node B each maintain their own counter with a distinct origin.
+	sa := newReplTestStore()
+	sa.SetLocalOrigin(0xA)
+	sb := newReplTestStore()
+	sb.SetLocalOrigin(0xB)
+
+	// Independent local increments.
+	sa.IncrBy("c", 5) // A: +5
+	sb.IncrBy("c", 7) // B: +7
+
+	// Snapshot each node's state and encode it as the wire payload.
+	stA, _ := sa.CounterState("c")
+	stB, _ := sb.CounterState("c")
+	encA, err := encodeCounterState(stA)
+	if err != nil {
+		t.Fatalf("encode A: %v", err)
+	}
+	encB, err := encodeCounterState(stB)
+	if err != nil {
+		t.Fatalf("encode B: %v", err)
+	}
+
+	hA := &StoreReplicationHandler{Store: sa}
+	hB := &StoreReplicationHandler{Store: sb}
+
+	// Cross-apply: B learns A's state, A learns B's state.
+	if err := hB.ApplyReplication(cluster.ReplicationEvent{Operation: "COUNTER", Key: "c", Value: encA}); err != nil {
+		t.Fatalf("apply A->B: %v", err)
+	}
+	if err := hA.ApplyReplication(cluster.ReplicationEvent{Operation: "COUNTER", Key: "c", Value: encB}); err != nil {
+		t.Fatalf("apply B->A: %v", err)
+	}
+
+	va, _ := sa.Get("c")
+	vb, _ := sb.Get("c")
+	if va != vb {
+		t.Fatalf("counters diverged: a=%q b=%q", va, vb)
+	}
+	if va != "12" {
+		t.Fatalf("converged value = %q, want \"12\" (5 + 7, nothing lost)", va)
+	}
+
+	// Duplicate delivery must not double-count.
+	if err := hA.ApplyReplication(cluster.ReplicationEvent{Operation: "COUNTER", Key: "c", Value: encB}); err != nil {
+		t.Fatalf("re-apply B->A: %v", err)
+	}
+	if v, _ := sa.Get("c"); v != "12" {
+		t.Fatalf("duplicate COUNTER changed value to %q, want \"12\"", v)
+	}
+}
+
 // TestApplyReplicationGetSet verifies GETSET replicates as a SET of the new
 // value (GETSET is dispatched through the replication table as an in-place SET).
 func TestApplyReplicationGetSet(t *testing.T) {
