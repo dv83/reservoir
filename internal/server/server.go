@@ -95,6 +95,22 @@ func New(cfg *config.Config) (*Server, error) {
 					return err
 				}
 				return nil
+			case "HSET", "HMSET":
+				// Hash mutations are logged with the null-separated
+				// "key\x00field\x00value..." encoding; replay rebuilds fields via
+				// plain HSet (the field CRDT stamps are re-established by the next
+				// live write or by anti-entropy).
+				if fv := membersFromReplData(entry.Value); len(fv) >= 2 {
+					_, err := kvStore.HSet(string(entry.Key), fv...)
+					return err
+				}
+				return nil
+			case "HDEL":
+				if fields := membersFromReplData(entry.Value); len(fields) > 0 {
+					_, err := kvStore.HDel(string(entry.Key), fields...)
+					return err
+				}
+				return nil
 			case "INCR", "INCRBY", "DECR", "DECRBY":
 				// Value contains the final result after increment/decrement
 				return kvStore.Set(string(entry.Key), string(entry.Value))

@@ -142,6 +142,33 @@ func (hv *HashValue) appendLWWDigest(key string, out []LWWShardEntry) []LWWShard
 	return out
 }
 
+// gcFieldTombstones drops field tombstones whose stamp predates cutoffNanos.
+// Live fields (a set is the winning write) are always kept. It returns how many
+// tombstones were pruned and whether the hash is now fully empty — no live
+// fields and no tombstones — so the caller can reclaim the key. The caller holds
+// the shard lock; this takes hv.mu.
+func (hv *HashValue) gcFieldTombstones(cutoffNanos int64) (pruned int, empty bool) {
+	hv.mu.Lock()
+	defer hv.mu.Unlock()
+
+	if hv.crdt == nil {
+		return 0, len(hv.Fields) == 0
+	}
+
+	for f, hf := range hv.crdt.fields {
+		if !hf.deleted {
+			continue // live field
+		}
+		if hf.stamp.TS.Physical < cutoffNanos {
+			delete(hv.crdt.fields, f)
+			pruned++
+		}
+	}
+
+	empty = len(hv.Fields) == 0 && len(hv.crdt.fields) == 0
+	return pruned, empty
+}
+
 // --- Store-level last-write-wins hash operations ---
 
 // HSetLWW is the convergent entry point for HSET/HMSET, used by the cluster path

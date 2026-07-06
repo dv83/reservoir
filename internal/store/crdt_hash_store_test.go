@@ -3,6 +3,7 @@ package store
 import (
 	"sort"
 	"testing"
+	"time"
 )
 
 func hkeys(t *testing.T, s *LockFreeStore, key string) []string {
@@ -125,6 +126,68 @@ func TestCRDTHashConvergence(t *testing.T) {
 			}
 		}
 		cur.Stop()
+	}
+}
+
+// TestCRDTHashTombstoneGC verifies that once a hash's field tombstones age out,
+// the GC pass prunes them and reclaims the now-empty hash, while a still-fresh
+// tombstone and any live field are preserved.
+func TestCRDTHashTombstoneGC(t *testing.T) {
+	s := newCRDTTestStore()
+	defer s.Stop()
+
+	past := time.Now().Add(-2 * time.Hour).UnixNano()
+	now := time.Now().UnixNano()
+
+	// "old" hash: a field set and deleted long ago — fully tombstoned.
+	s.HSetLWW("old", past, 0, 1, "a", "1")
+	s.HDelLWW("old", past+1, 0, 1, "a")
+
+	// "mixed" hash: a live field plus a field deleted just now (fresh tombstone).
+	s.HSetLWW("mixed", now, 0, 1, "live", "v")
+	s.HSetLWW("mixed", past, 0, 1, "gone", "x")
+	s.HDelLWW("mixed", now, 0, 1, "gone")
+
+	s.gcTombstones(time.Hour)
+
+	if _, ok := s.GetStoredValue("old"); ok {
+		t.Error("fully-aged-out empty hash 'old' was not reclaimed")
+	}
+	if v, ok, _ := s.HGet("mixed", "live"); !ok || v != "v" {
+		t.Errorf("live field pruned by GC: (%q,%v)", v, ok)
+	}
+	// Fresh tombstone for "gone" must survive: a stale re-set must fail.
+	s.HSetLWW("mixed", past+5, 0, 1, "gone", "stale")
+	if _, ok, _ := s.HGet("mixed", "gone"); ok {
+		t.Error("fresh tombstone for 'gone' was incorrectly GC'd (stale set resurrected it)")
+	}
+}
+
+// TestCRDTHashPersistedToCommitLog verifies HSetLWW/HDelLWW append HSET/HDEL
+// records with the null-separated payload the recovery path decodes.
+func TestCRDTHashPersistedToCommitLog(t *testing.T) {
+	s := newCRDTTestStore()
+	defer s.Stop()
+	fake := &fakeCommitLog{}
+	s.SetCommitLog(fake)
+
+	s.HSetLWW("h", 100, 0, 1, "a", "1", "b", "2")
+	s.HDelLWW("h", 200, 0, 1, "a")
+
+	var setVal, delVal string
+	for _, w := range fake.writes {
+		switch {
+		case w.op == "HSET" && w.key == "h":
+			setVal = w.value
+		case w.op == "HDEL" && w.key == "h":
+			delVal = w.value
+		}
+	}
+	if setVal != "h\x00a\x001\x00b\x002" {
+		t.Fatalf("HSET payload = %q, want %q", setVal, "h\x00a\x001\x00b\x002")
+	}
+	if delVal != "h\x00a" {
+		t.Fatalf("HDEL payload = %q, want %q", delVal, "h\x00a")
 	}
 }
 
