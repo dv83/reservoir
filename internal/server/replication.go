@@ -45,6 +45,16 @@ func membersFromReplData(value []byte) []string {
 	return parts[1:]
 }
 
+// hincrResult extracts the field and computed result from the HINCRBY/
+// HINCRBYFLOAT replication encoding "key\x00field\x00increment\x00result".
+func hincrResult(value []byte) (field, result string, ok bool) {
+	parts := strings.Split(string(value), "\x00")
+	if len(parts) < 4 {
+		return "", "", false
+	}
+	return parts[1], parts[3], true
+}
+
 // ShardCount reports the store's shard count for anti-entropy rotation.
 func (h *StoreReplicationHandler) ShardCount() int {
 	return h.Store.ShardCount()
@@ -151,7 +161,12 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 			logger.Warning("Invalid HSET/HMSET replication data: %s", string(event.Value))
 			return nil
 		}
-		// parts[0] is key, parts[1:] are field-value pairs
+		// parts[0] is key, parts[1:] are field-value pairs. Per-field CRDT: a
+		// stamped event converges under LWW; unstamped events fall back to plain.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			_, err := h.Store.HSetLWW(event.Key, event.HLCPhysical, event.HLCLogical, event.HLCOrigin, parts[1:]...)
+			return err
+		}
 		_, err := h.Store.HSet(event.Key, parts[1:]...)
 		return err
 	case "HDEL":
@@ -161,28 +176,27 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 			return nil
 		}
 		fields := parts[1:]
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			_, err := h.Store.HDelLWW(event.Key, event.HLCPhysical, event.HLCLogical, event.HLCOrigin, fields...)
+			return err
+		}
 		_, err := h.Store.HDel(event.Key, fields...)
 		return err
-	case "HINCRBY":
-		// Data: "key\x00field\x00increment\x00result"
+	case "HINCRBY", "HINCRBYFLOAT":
+		// Data: "key\x00field\x00increment\x00result". The result is applied as a
+		// per-field set so it converges (last-write-wins on the field) and stays
+		// consistent with the field CRDT; unstamped events fall back to plain.
 		parts := strings.Split(string(event.Value), "\x00")
 		if len(parts) < 4 {
-			logger.Warning("Invalid HINCRBY replication data: %s", string(event.Value))
+			logger.Warning("Invalid %s replication data: %s", event.Operation, string(event.Value))
 			return nil
 		}
 		field := parts[1]
 		resultStr := parts[3]
-		// We use HSet to apply the fixed result on followers to ensure consistency
-		_, err := h.Store.HSet(event.Key, field, resultStr)
-		return err
-	case "HINCRBYFLOAT":
-		parts := strings.Split(string(event.Value), "\x00")
-		if len(parts) < 4 {
-			logger.Warning("Invalid HINCRBYFLOAT replication data: %s", string(event.Value))
-			return nil
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			_, err := h.Store.HSetLWW(event.Key, event.HLCPhysical, event.HLCLogical, event.HLCOrigin, field, resultStr)
+			return err
 		}
-		field := parts[1]
-		resultStr := parts[3]
 		_, err := h.Store.HSet(event.Key, field, resultStr)
 		return err
 	case "SPOP":

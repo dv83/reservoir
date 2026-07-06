@@ -229,6 +229,69 @@ func TestApplyReplicationSetCRDTConverges(t *testing.T) {
 	}
 }
 
+// hashReplEvent builds a stamped HSET/HDEL replication event using the same
+// null-separated encoding the command layer emits.
+func hashReplEvent(op, key string, physical int64, origin uint64, args ...string) cluster.ReplicationEvent {
+	payload := key
+	for _, a := range args {
+		payload += "\x00" + a
+	}
+	return cluster.ReplicationEvent{
+		Operation:   op,
+		Key:         key,
+		Value:       []byte(payload),
+		HLCPhysical: physical,
+		HLCOrigin:   origin,
+	}
+}
+
+// TestApplyReplicationHashCRDTConverges verifies that stamped HSET/HDEL events
+// converge to the same fields and values on two replicas regardless of arrival
+// order, including a delete blocking a concurrent older set.
+func TestApplyReplicationHashCRDTConverges(t *testing.T) {
+	events := []cluster.ReplicationEvent{
+		hashReplEvent("HSET", "h", 100, 1, "a", "1", "b", "2"),
+		hashReplEvent("HDEL", "h", 200, 2, "a"),
+		hashReplEvent("HSET", "h", 150, 3, "a", "stale"), // older than delete — must not resurrect
+		hashReplEvent("HSET", "h", 300, 1, "c", "3"),
+	}
+
+	fields := func(h *StoreReplicationHandler) []string {
+		all, _ := h.Store.HGetAll("h")
+		sort.Strings(all)
+		return all
+	}
+
+	h1 := &StoreReplicationHandler{Store: newReplTestStore()}
+	for _, e := range events {
+		_ = h1.ApplyReplication(e)
+	}
+	h2 := &StoreReplicationHandler{Store: newReplTestStore()}
+	for i := len(events) - 1; i >= 0; i-- {
+		_ = h2.ApplyReplication(events[i])
+	}
+
+	f1, f2 := fields(h1), fields(h2)
+	if len(f1) != len(f2) {
+		t.Fatalf("replicas diverged: h1=%v h2=%v", f1, f2)
+	}
+	for i := range f1 {
+		if f1[i] != f2[i] {
+			t.Fatalf("replicas diverged: h1=%v h2=%v", f1, f2)
+		}
+	}
+	// "a" deleted at 200 must stay gone; b=2 and c=3 present.
+	if v, ok, _ := h1.Store.HGet("h", "a"); ok {
+		t.Fatalf("deleted field 'a' resurrected as %q", v)
+	}
+	if v, _, _ := h1.Store.HGet("h", "b"); v != "2" {
+		t.Fatalf("field b = %q, want 2", v)
+	}
+	if v, _, _ := h1.Store.HGet("h", "c"); v != "3" {
+		t.Fatalf("field c = %q, want 3", v)
+	}
+}
+
 // TestAntiEntropyReconcilesCounter verifies anti-entropy heals a counter that
 // missed a live COUNTER event: after reconciliation the lagging node reflects
 // the peer's increments, merged with its own.

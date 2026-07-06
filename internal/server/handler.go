@@ -166,6 +166,31 @@ func (s *Server) handleConnection(conn net.Conn) {
 						logger.Error("failed to encode counter state for %s: %v", key, err)
 					}
 				}
+			case "HSET", "HMSET":
+				// Per-field CRDT: stamp each field so concurrent field writes
+				// across nodes converge. The handler already applied the plain
+				// write (for the reply count); this records the field stamps.
+				p, l, o := s.clusterManager.NextStamp()
+				if fv := membersFromReplData(value); len(fv) >= 2 {
+					_, _ = s.kvStore.HSetLWW(key, p, l, o, fv...)
+				}
+				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			case "HDEL":
+				p, l, o := s.clusterManager.NextStamp()
+				if fields := membersFromReplData(value); len(fields) > 0 {
+					_, _ = s.kvStore.HDelLWW(key, p, l, o, fields...)
+				}
+				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			case "HINCRBY", "HINCRBYFLOAT":
+				// value is "key\x00field\x00increment\x00result". Converge the
+				// field's resulting value under per-field LWW (concurrent
+				// increments on the same field are last-write-wins, not summed),
+				// keeping the CRDT and materialized fields consistent.
+				if field, result, ok := hincrResult(value); ok {
+					p, l, o := s.clusterManager.NextStamp()
+					_, _ = s.kvStore.HSetLWW(key, p, l, o, field, result)
+					s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+				}
 			default:
 				s.clusterManager.QueueReplication(operation, key, value)
 			}
