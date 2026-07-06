@@ -15,6 +15,17 @@ type StoreReplicationHandler struct {
 	Store store.KVStore
 }
 
+// membersFromReplData extracts the members from the null-separated set
+// replication encoding "key\x00member1\x00member2\x00...". It returns nil when
+// no members are present.
+func membersFromReplData(value []byte) []string {
+	parts := strings.Split(string(value), "\x00")
+	if len(parts) < 2 {
+		return nil
+	}
+	return parts[1:]
+}
+
 // ShardCount reports the store's shard count for anti-entropy rotation.
 func (h *StoreReplicationHandler) ShardCount() int {
 	return h.Store.ShardCount()
@@ -68,6 +79,12 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 			return nil
 		}
 		members := parts[1:]
+		// Element-level CRDT: a stamped event converges under last-write-wins;
+		// unstamped events (older senders) fall back to a plain add.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			_, err := h.Store.SAddLWW(event.Key, event.HLCPhysical, event.HLCLogical, event.HLCOrigin, members...)
+			return err
+		}
 		_, err := h.Store.SAdd(event.Key, members...)
 		return err
 	case "SREM":
@@ -77,6 +94,10 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 			return nil
 		}
 		members := parts[1:]
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			_, err := h.Store.SRemLWW(event.Key, event.HLCPhysical, event.HLCLogical, event.HLCOrigin, members...)
+			return err
+		}
 		_, err := h.Store.SRem(event.Key, members...)
 		return err
 	case "MSET":
@@ -135,6 +156,12 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 		return err
 	case "SPOP":
 		element := string(event.Value)
+		// SPOP replicates as a removal of the specific popped element; a stamped
+		// event records a converging tombstone, like SREM.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			_, err := h.Store.SRemLWW(event.Key, event.HLCPhysical, event.HLCLogical, event.HLCOrigin, element)
+			return err
+		}
 		_, err := h.Store.SRem(event.Key, element)
 		return err
 	case "SDIFFSTORE":

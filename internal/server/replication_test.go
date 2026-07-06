@@ -1,6 +1,7 @@
 package server
 
 import (
+	"sort"
 	"strconv"
 	"testing"
 	"time"
@@ -124,6 +125,64 @@ func TestAntiEntropyReconciles(t *testing.T) {
 	}
 	if _, ok := b.Store.Get("gone"); ok {
 		t.Errorf("tombstone did not propagate: 'gone' still present")
+	}
+}
+
+// setReplEvent builds a stamped SADD/SREM replication event using the same
+// null-separated encoding the command layer emits.
+func setReplEvent(op, key string, physical int64, origin uint64, members ...string) cluster.ReplicationEvent {
+	payload := key
+	for _, m := range members {
+		payload += "\x00" + m
+	}
+	return cluster.ReplicationEvent{
+		Operation:   op,
+		Key:         key,
+		Value:       []byte(payload),
+		HLCPhysical: physical,
+		HLCOrigin:   origin,
+	}
+}
+
+// TestApplyReplicationSetCRDTConverges verifies that stamped SADD/SREM events
+// converge to the same membership on two replicas regardless of arrival order,
+// including the key property that a remove blocks a concurrent older add.
+func TestApplyReplicationSetCRDTConverges(t *testing.T) {
+	events := []cluster.ReplicationEvent{
+		setReplEvent("SADD", "s", 100, 1, "a", "b"),
+		setReplEvent("SREM", "s", 200, 2, "a"),
+		setReplEvent("SADD", "s", 150, 3, "a"), // older than the remove — must not resurrect
+		setReplEvent("SADD", "s", 300, 1, "c"),
+	}
+
+	members := func(h *StoreReplicationHandler) []string {
+		m, _ := h.Store.SMembers("s")
+		sort.Strings(m)
+		return m
+	}
+
+	h1 := &StoreReplicationHandler{Store: newReplTestStore()}
+	for _, e := range events {
+		_ = h1.ApplyReplication(e)
+	}
+
+	h2 := &StoreReplicationHandler{Store: newReplTestStore()}
+	for i := len(events) - 1; i >= 0; i-- { // reverse order
+		_ = h2.ApplyReplication(events[i])
+	}
+
+	m1, m2 := members(h1), members(h2)
+	if len(m1) != len(m2) {
+		t.Fatalf("replicas diverged: h1=%v h2=%v", m1, m2)
+	}
+	for i := range m1 {
+		if m1[i] != m2[i] {
+			t.Fatalf("replicas diverged: h1=%v h2=%v", m1, m2)
+		}
+	}
+	// "a" removed at 200 must stay gone; "b" and "c" present.
+	if got := m1; !(len(got) == 2 && got[0] == "b" && got[1] == "c") {
+		t.Fatalf("converged membership = %v, want [b c]", got)
 	}
 }
 

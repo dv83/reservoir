@@ -133,6 +133,27 @@ func (s *Server) handleConnection(conn net.Conn) {
 				p, l, o := s.clusterManager.NextStamp()
 				s.kvStore.DeleteLWW(key, p, l, o)
 				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			case "SADD":
+				// Element-level CRDT: stamp each member so concurrent add/remove
+				// across nodes converges. The handler already applied the plain
+				// add (for the reply count); this records the element stamps.
+				p, l, o := s.clusterManager.NextStamp()
+				if members := membersFromReplData(value); len(members) > 0 {
+					_, _ = s.kvStore.SAddLWW(key, p, l, o, members...)
+				}
+				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			case "SREM":
+				p, l, o := s.clusterManager.NextStamp()
+				if members := membersFromReplData(value); len(members) > 0 {
+					_, _ = s.kvStore.SRemLWW(key, p, l, o, members...)
+				}
+				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			case "SPOP":
+				// SPOP removes a specific element; value is that element. Record a
+				// stamped tombstone so the removal converges like an SREM.
+				p, l, o := s.clusterManager.NextStamp()
+				_, _ = s.kvStore.SRemLWW(key, p, l, o, string(value))
+				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
 			default:
 				s.clusterManager.QueueReplication(operation, key, value)
 			}

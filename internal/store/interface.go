@@ -64,6 +64,8 @@ type KVStore interface {
 	// Set операції
 	SAdd(key string, members ...string) (int64, error)
 	SRem(key string, members ...string) (int64, error)
+	SAddLWW(key string, physical int64, logical uint32, origin uint64, members ...string) (int64, error)
+	SRemLWW(key string, physical int64, logical uint32, origin uint64, members ...string) (int64, error)
 	SIsMember(key string, member string) (bool, error)
 	SCard(key string) (int64, error)
 	SMembers(key string) ([]string, error)
