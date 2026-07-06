@@ -42,6 +42,7 @@ type ClusterManager struct {
 
 	// Election state
 	electionTimer    *time.Timer
+	electionTimerMu  sync.Mutex // guards electionTimer reset/stop against concurrent resets
 	electionTimeout  time.Duration
 	lastElectionTime atomic.Value // time.Time
 	votesReceived    atomic.Uint32
@@ -487,15 +488,29 @@ func (cm *ClusterManager) becomeLeader() {
 	}
 }
 
-// resetElectionTimer resets the election timer with random timeout
+// resetElectionTimer resets the election timer with a random timeout. The timer
+// is created once (before the election loop starts) and reset in place
+// thereafter, so the loop never observes the field being reassigned — the reset
+// path only mutates the timer's state under electionTimerMu, which also
+// serializes concurrent resets from the various message handlers.
 func (cm *ClusterManager) resetElectionTimer() {
 	timeout := ElectionTimeoutMin + time.Duration(rand.Int63n(int64(ElectionTimeoutMax-ElectionTimeoutMin)))
 
-	if cm.electionTimer != nil {
-		cm.electionTimer.Stop()
-	}
+	cm.electionTimerMu.Lock()
+	defer cm.electionTimerMu.Unlock()
 
-	cm.electionTimer = time.NewTimer(timeout)
+	if cm.electionTimer == nil {
+		cm.electionTimer = time.NewTimer(timeout)
+	} else {
+		// Stop and drain (non-blocking) before Reset, the safe reuse pattern.
+		if !cm.electionTimer.Stop() {
+			select {
+			case <-cm.electionTimer.C:
+			default:
+			}
+		}
+		cm.electionTimer.Reset(timeout)
+	}
 	cm.electionTimeout = timeout
 }
 
