@@ -20,6 +20,14 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 	logger.Debug("Applying replication event: Op=%s, Key=%s, EventID=%s", event.Operation, event.Key, event.EventID)
 	switch event.Operation {
 	case "SET":
+		// Last-write-wins: apply the value only if the event's HLC stamp is newer
+		// than what we hold. A stamped event (HLC set) goes through SetLWW so
+		// concurrent writes converge; unstamped events (older senders) fall back
+		// to a plain Set.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			_, err := h.Store.SetLWW(event.Key, string(event.Value), event.HLCPhysical, event.HLCLogical, event.HLCOrigin)
+			return err
+		}
 		return h.Store.Set(event.Key, string(event.Value))
 	case "DEL":
 		h.Store.Delete(event.Key)

@@ -19,6 +19,8 @@ type KVStore interface {
 	// Основні операції
 	Set(key, value string) error
 	SetWithOptions(key, value string, opts SetOptions) (bool, error)
+	SetLWW(key, value string, physical int64, logical uint32, origin uint64) (bool, error)
+	GetLWW(key string) (physical int64, logical uint32, origin uint64, ok bool)
 	Get(key string) (string, bool)
 	Delete(key string) bool
 	Clear()

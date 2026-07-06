@@ -98,6 +98,24 @@ func (s *LockFreeStore) SetWithHLC(key, value string, stamp hlcStamp) (bool, err
 	return true, nil
 }
 
+// SetLWW is the exported entry point for a last-write-wins string set, used by
+// the replication layer (which cannot construct the unexported stamp). physical
+// and logical are an HLC timestamp; origin is the writing node's id. Returns
+// whether the write was applied.
+func (s *LockFreeStore) SetLWW(key, value string, physical int64, logical uint32, origin uint64) (bool, error) {
+	return s.SetWithHLC(key, value, hlcStamp{TS: types.HLCTimestamp{Physical: physical, Logical: logical}, Origin: origin})
+}
+
+// GetLWW returns the HLC stamp recorded for a key as raw fields, for anti-entropy
+// digests. ok is false if the key does not exist.
+func (s *LockFreeStore) GetLWW(key string) (physical int64, logical uint32, origin uint64, ok bool) {
+	st, exists := s.GetHLC(key)
+	if !exists {
+		return 0, 0, 0, false
+	}
+	return st.TS.Physical, st.TS.Logical, st.Origin, true
+}
+
 // GetHLC returns the LWW stamp recorded for a key, if it exists.
 func (s *LockFreeStore) GetHLC(key string) (hlcStamp, bool) {
 	shard := s.shards[int(FastHash(key)&s.shardMask)]

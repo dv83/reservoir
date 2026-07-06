@@ -50,11 +50,13 @@ func HandleZeroCopySetWithReplication(kvStore store.KVStore, cmd *protocol.ZeroC
 
 	// ULTRA FAST PATH: plain "SET key value" with no options.
 	if argc == 2 {
-		if err := kvStore.Set(key, value); err != nil {
-			return writeError(writer, err.Error())
-		}
 		if replicate != nil {
+			// Cluster mode: the replication callback stamps the write with an HLC
+			// and applies it locally under last-write-wins (so it also serves as
+			// the local write). See the callback in server/handler.go.
 			replicate("SET", key, []byte(value))
+		} else if err := kvStore.Set(key, value); err != nil {
+			return writeError(writer, err.Error())
 		}
 		_, err := writer.Write(okResponse)
 		return err

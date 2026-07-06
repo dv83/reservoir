@@ -49,6 +49,32 @@ func TestApplyReplicationExpirePersist(t *testing.T) {
 	}
 }
 
+// TestApplyReplicationSetLWW verifies that HLC-stamped SET events converge to
+// the newer write regardless of the order they are applied on a replica.
+func TestApplyReplicationSetLWW(t *testing.T) {
+	older := cluster.ReplicationEvent{Operation: "SET", Key: "k", Value: []byte("old"), HLCPhysical: 100, HLCOrigin: 1}
+	newer := cluster.ReplicationEvent{Operation: "SET", Key: "k", Value: []byte("new"), HLCPhysical: 200, HLCOrigin: 1}
+
+	s1 := newReplTestStore()
+	h1 := &StoreReplicationHandler{Store: s1}
+	_ = h1.ApplyReplication(older)
+	_ = h1.ApplyReplication(newer)
+
+	s2 := newReplTestStore()
+	h2 := &StoreReplicationHandler{Store: s2}
+	_ = h2.ApplyReplication(newer) // reverse arrival order
+	_ = h2.ApplyReplication(older)
+
+	v1, _ := s1.Get("k")
+	v2, _ := s2.Get("k")
+	if v1 != v2 {
+		t.Fatalf("replicas diverged under LWW: s1=%q s2=%q", v1, v2)
+	}
+	if v1 != "new" {
+		t.Fatalf("converged on %q, want the newer write", v1)
+	}
+}
+
 // TestApplyReplicationGetSet verifies GETSET replicates as a SET of the new
 // value (GETSET is dispatched through the replication table as an in-place SET).
 func TestApplyReplicationGetSet(t *testing.T) {
