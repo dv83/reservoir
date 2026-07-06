@@ -428,6 +428,20 @@ func (s *LockFreeStore) finishListDelete(shard *LockFreeShard, key string, list 
 	s.commitListWrite(shard, key, list, sv, true)
 }
 
+// fullDelta returns every RGA element (live and tombstoned) as a delta, for
+// anti-entropy. It returns nil for a list with no CRDT state. The caller holds
+// at least the shard read lock.
+func (lv *ListValue) fullDelta() *ListDelta {
+	if lv.rga == nil {
+		return nil
+	}
+	d := &ListDelta{Elems: make([]ListElemDesc, 0, len(lv.rga.elems))}
+	for _, e := range lv.rga.elems {
+		d.Elems = append(d.Elems, descFromElem(*e))
+	}
+	return d
+}
+
 // DrainListDelta returns and clears the pending replication descriptors for a
 // list key. ok is false if the key is not a CRDT list or has nothing pending.
 func (s *LockFreeStore) DrainListDelta(key string) (ListDelta, bool) {

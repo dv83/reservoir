@@ -102,6 +102,9 @@ func (cm *ClusterManager) handleSyncResponse(msg *Message) error {
 		if e.Counter {
 			// PN-counter state; apply path max-merges it.
 			op = "COUNTER"
+		} else if e.List {
+			// RGA element set; apply path merges the delta.
+			op = "LDELTA"
 		} else if e.Hash {
 			// Hash field: HSET if present, HDEL if tombstoned. The apply path
 			// expects "key\x00field[\x00value]".

@@ -255,6 +255,9 @@ type LWWShardEntry struct {
 	// Hash marks a hash field entry: Member is the field, Value its value
 	// (empty when Deleted), reconciled by the per-field LWW stamp.
 	Hash bool
+	// List, when non-nil, means this entry is a list key: the full RGA element
+	// set, reconciled by merging the delta (idempotent inserts and tombstones).
+	List *ListDelta
 }
 
 // ShardCount returns the number of shards, so callers can iterate them.
@@ -300,6 +303,12 @@ func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
 		case ValueTypeHash:
 			if v.HashVal != nil {
 				entries = v.HashVal.appendLWWDigest(k, entries)
+			}
+		case ValueTypeList:
+			if v.ListVal != nil {
+				if d := v.ListVal.fullDelta(); d != nil {
+					entries = append(entries, LWWShardEntry{Key: k, List: d})
+				}
 			}
 		}
 	}

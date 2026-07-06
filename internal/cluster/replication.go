@@ -32,6 +32,9 @@ type SyncEntry struct {
 	// Hash marks a hash field entry: Member is the field, Value its value
 	// (empty when Deleted), reconciled by the per-field LWW stamp.
 	Hash bool `json:"hash,omitempty"`
+	// List marks a list key: Value holds the encoded RGA element set, reconciled
+	// by merging the delta.
+	List bool `json:"list,omitempty"`
 }
 
 // SyncRequest asks a peer for the LWW digest of one shard.

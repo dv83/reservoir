@@ -102,6 +102,16 @@ func (h *StoreReplicationHandler) LocalDigest(shardIdx int) []cluster.SyncEntry 
 				continue
 			}
 		}
+		if e.List != nil {
+			// Carry the full RGA element set; peers merge the delta.
+			if enc, err := encodeListDelta(*e.List); err == nil {
+				se.Value = enc
+				se.List = true
+			} else {
+				logger.Warning("failed to encode list digest for %s: %v", e.Key, err)
+				continue
+			}
+		}
 		entries = append(entries, se)
 	}
 	return entries

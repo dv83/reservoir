@@ -88,6 +88,8 @@ func reconcile(into *StoreReplicationHandler, from *StoreReplicationHandler) {
 			switch {
 			case e.Counter:
 				op = "COUNTER"
+			case e.List:
+				op = "LDELTA"
 			case e.Hash:
 				if e.Deleted {
 					op = "HDEL"
@@ -235,6 +237,38 @@ func TestApplyReplicationSetCRDTConverges(t *testing.T) {
 	// "a" removed at 200 must stay gone; "b" and "c" present.
 	if got := m1; !(len(got) == 2 && got[0] == "b" && got[1] == "c") {
 		t.Fatalf("converged membership = %v, want [b c]", got)
+	}
+}
+
+// TestAntiEntropyReconcilesList verifies anti-entropy heals list divergence from
+// a dropped delta: a node that missed a peer's pushes and a pop is brought into
+// the same converged sequence via the full-state list digest.
+func TestAntiEntropyReconcilesList(t *testing.T) {
+	sa := newReplTestStore()
+	sa.SetLocalOrigin(1)
+	sb := newReplTestStore()
+	sb.SetLocalOrigin(2)
+	a := &StoreReplicationHandler{Store: sa}
+	b := &StoreReplicationHandler{Store: sb}
+
+	// a builds a list and pops one element; b missed all of it.
+	sa.RPush("l", "a", "b", "c")
+	sa.LPop("l", 1) // removes "a"
+
+	reconcile(b, a)
+
+	la, _ := sa.LRange("l", 0, -1)
+	lb, _ := sb.LRange("l", 0, -1)
+	if !reflect.DeepEqual(la, lb) {
+		t.Fatalf("after reconcile diverged: a=%v b=%v", la, lb)
+	}
+	if !reflect.DeepEqual(lb, []string{"b", "c"}) {
+		t.Fatalf("b = %v, want [b c] (pop of 'a' propagated)", lb)
+	}
+	// Idempotent second pass.
+	reconcile(b, a)
+	if lb2, _ := sb.LRange("l", 0, -1); !reflect.DeepEqual(lb2, []string{"b", "c"}) {
+		t.Fatalf("second reconcile changed b to %v", lb2)
 	}
 }
 
