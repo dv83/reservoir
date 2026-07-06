@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	pkgErrors "reservoir/pkg/errors"
 	"reservoir/pkg/types"
@@ -250,6 +251,7 @@ func (s *LockFreeStore) popCRDT(key string, count int, fromHead bool) ([]string,
 		count = len(vis)
 	}
 
+	now := time.Now().UnixNano()
 	popped := make([]string, 0, count)
 	changed := make([]rgaElem, 0, count)
 	for i := 0; i < count; i++ {
@@ -259,7 +261,7 @@ func (s *LockFreeStore) popCRDT(key string, count int, fromHead bool) ([]string,
 		} else {
 			e = vis[len(vis)-1-i]
 		}
-		r.applyDelete(e.id)
+		r.applyDeleteAt(e.id, now)
 		e.deleted = true
 		popped = append(popped, e.value)
 		changed = append(changed, e)
@@ -326,9 +328,10 @@ func (s *LockFreeStore) lremCRDT(key string, count int64, element string) (int64
 		fromTail = true
 	}
 
+	now := time.Now().UnixNano()
 	changed := make([]rgaElem, 0)
 	removeOne := func(e rgaElem) {
-		r.applyDelete(e.id)
+		r.applyDeleteAt(e.id, now)
 		e.deleted = true
 		changed = append(changed, e)
 	}
@@ -395,11 +398,12 @@ func (s *LockFreeStore) ltrimCRDT(key string, start, stop int64) error {
 		stop = n - 1
 	}
 
+	now := time.Now().UnixNano()
 	changed := make([]rgaElem, 0)
 	for i := int64(0); i < n; i++ {
 		if start > stop || i < start || i > stop {
 			e := vis[i]
-			r.applyDelete(e.id)
+			r.applyDeleteAt(e.id, now)
 			e.deleted = true
 			changed = append(changed, e)
 		}
@@ -483,9 +487,10 @@ func (s *LockFreeStore) ApplyListDelta(key string, delta ListDelta) error {
 	}
 	r := list.rga
 
+	now := time.Now().UnixNano()
 	for _, d := range delta.Elems {
 		if d.Deleted {
-			r.applyDelete(d.id())
+			r.applyDeleteAt(d.id(), now)
 		} else {
 			r.applyInsert(d.elem())
 		}

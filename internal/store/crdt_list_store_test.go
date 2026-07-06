@@ -3,6 +3,7 @@ package store
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func newListCRDTStore(origin uint64) *LockFreeStore {
@@ -132,6 +133,38 @@ func TestListCRDTPopTombstoneConverges(t *testing.T) {
 	b.ApplyListDelta("l", pushDelta)
 	if got := lrange(t, b, "l"); !reflect.DeepEqual(got, []string{"y"}) {
 		t.Fatalf("re-delivered insert resurrected x: %v", got)
+	}
+}
+
+// TestListCRDTTombstoneGC verifies aged-out list tombstones are pruned and a
+// fully-emptied list is reclaimed, while fresh tombstones are retained.
+func TestListCRDTTombstoneGC(t *testing.T) {
+	s := newListCRDTStore(1)
+	defer s.Stop()
+
+	// "gone": build and empty it, then backdate its tombstones so GC reclaims it.
+	s.RPush("gone", "a", "b")
+	s.LPop("gone", 2) // fully emptied; tombstones retained
+	shard := s.getShard("gone")
+	shard.mu.Lock()
+	if sv, ok := shard.data["gone"]; ok && sv.ListVal != nil && sv.ListVal.rga != nil {
+		for _, e := range sv.ListVal.rga.elems {
+			e.delTime = time.Now().Add(-2 * time.Hour).UnixNano()
+		}
+	}
+	shard.mu.Unlock()
+
+	// "live" list keeps its elements and a fresh tombstone.
+	s.RPush("live", "x", "y", "z")
+	s.LRem("live", 1, "y") // fresh tombstone for y
+
+	s.gcTombstones(time.Hour)
+
+	if _, ok := s.GetStoredValue("gone"); ok {
+		t.Error("fully-aged-out empty list 'gone' was not reclaimed")
+	}
+	if got := lrange(t, s, "live"); !reflect.DeepEqual(got, []string{"x", "z"}) {
+		t.Errorf("live list after GC = %v, want [x z]", got)
 	}
 }
 

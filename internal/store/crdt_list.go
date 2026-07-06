@@ -34,6 +34,11 @@ type rgaElem struct {
 	value    string
 	valStamp hlcStamp
 	deleted  bool
+	// delTime is the local unix-nanos time this node tombstoned the element,
+	// used only for tombstone GC. It is never replicated (each node ages its own
+	// tombstones from when it learned of the delete), so element ids can stay a
+	// synthetic counter rather than a wall clock.
+	delTime int64
 }
 
 func newRGAList() *rgaList {
@@ -120,11 +125,35 @@ func (r *rgaList) applyInsert(e rgaElem) {
 // applyDelete tombstones the element id, recording a placeholder if the element
 // has not arrived yet so a later insert cannot resurrect it.
 func (r *rgaList) applyDelete(id hlcStamp) {
+	r.applyDeleteAt(id, 0)
+}
+
+// applyDeleteAt tombstones the element id and stamps the local deletion time
+// (unix nanos) used for GC. atNanos of 0 leaves the tombstone un-GC-able (used
+// by pure tests).
+func (r *rgaList) applyDeleteAt(id hlcStamp, atNanos int64) {
 	if cur, ok := r.elems[id]; ok {
 		cur.deleted = true
+		if cur.delTime == 0 {
+			cur.delTime = atNanos
+		}
 		return
 	}
-	r.elems[id] = &rgaElem{id: id, deleted: true}
+	r.elems[id] = &rgaElem{id: id, deleted: true, delTime: atNanos}
+}
+
+// gcTombstones removes tombstones whose local deletion time predates
+// cutoffNanos, and reports whether the list is now fully empty (no elements at
+// all) so the caller can reclaim the key. Same bounded tradeoff as the other
+// CRDTs: a delivery delayed past the retention window can resurrect an element.
+func (r *rgaList) gcTombstones(cutoffNanos int64) (pruned int, empty bool) {
+	for id, e := range r.elems {
+		if e.deleted && e.delTime > 0 && e.delTime < cutoffNanos {
+			delete(r.elems, id)
+			pruned++
+		}
+	}
+	return pruned, len(r.elems) == 0
 }
 
 // setValue replaces the value of a live element under last-write-wins, returning

@@ -169,9 +169,10 @@ func (s *LockFreeStore) DeleteLWW(key string, physical int64, logical uint32, or
 // gcTombstones removes tombstones older than the retention window. Tombstones
 // only need to outlive the delivery of any concurrent older write; a generous
 // window bounds memory without risking resurrection under normal delivery. It
-// prunes string-key tombstones as well as set element and hash field
-// tombstones, and reclaims a CRDT set or hash once all its tombstones have aged
-// out (so an emptied container eventually disappears from the keyspace).
+// prunes string-key tombstones as well as set element, hash field, and list
+// element tombstones, and reclaims a CRDT container once all its tombstones have
+// aged out (so an emptied set, hash, or list eventually disappears from the
+// keyspace).
 func (s *LockFreeStore) gcTombstones(retain time.Duration) int {
 	cutoff := time.Now().Add(-retain)
 	cutoffNanos := cutoff.UnixNano()
@@ -202,6 +203,11 @@ func (s *LockFreeStore) gcTombstones(retain time.Duration) int {
 					continue
 				}
 				pruned, empty = v.HashVal.gcFieldTombstones(cutoffNanos)
+			case ValueTypeList:
+				if v.ListVal == nil || v.ListVal.rga == nil {
+					continue
+				}
+				pruned, empty = v.ListVal.rga.gcTombstones(cutoffNanos)
 			default:
 				continue
 			}
