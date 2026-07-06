@@ -81,6 +81,12 @@ type SetValue struct {
 	mu       sync.RWMutex        // For concurrent access safety
 
 	totalSize int64 // Total number of elements
+
+	// crdt holds per-element last-write-wins stamps for cluster convergence. It
+	// is nil for sets only ever touched by the plain (non-cluster) Add/Remove
+	// path, and is created lazily on the first stamped op. When present, the
+	// Elements map is the materialized view of the CRDT membership.
+	crdt *lwwSet
 }
 
 // NewSetValue creates a new set value
@@ -269,6 +275,18 @@ func (sv *SetValue) MemoryUsage() int64 {
 	size := int64(unsafe.Sizeof(*sv))
 	for element := range sv.Elements {
 		size += int64(len(element))
+	}
+
+	// Element stamps roughly double per-element storage when the CRDT is active
+	// (an add stamp, plus a remove stamp for tombstoned elements).
+	if sv.crdt != nil {
+		stampSize := int64(unsafe.Sizeof(hlcStamp{}))
+		for element := range sv.crdt.adds {
+			size += int64(len(element)) + stampSize
+		}
+		for element := range sv.crdt.removes {
+			size += int64(len(element)) + stampSize
+		}
 	}
 
 	return size
