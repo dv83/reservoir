@@ -578,6 +578,14 @@ func (sv *StoredValue) Release() {
 type ListValue struct {
 	deque *Deque       `json:"-"`
 	mu    sync.RWMutex `json:"-"`
+
+	// rga holds the sequence CRDT for cluster convergence. It is nil for lists
+	// only ever touched by the plain (non-cluster) path; when present it is the
+	// source of truth and the deque is rebuilt from it as the read view.
+	rga *rgaList `json:"-"`
+	// pending accumulates the element descriptors changed since the last
+	// replication drain (cluster mode only).
+	pending []ListElemDesc `json:"-"`
 }
 
 // Elements returns the list elements as a slice (for JSON serialization)
@@ -746,7 +754,14 @@ func (lv *ListValue) MemoryUsage() int64 {
 	lv.mu.RLock()
 	defer lv.mu.RUnlock()
 
-	return lv.deque.MemoryUsage() + int64(unsafe.Sizeof(*lv))
+	size := lv.deque.MemoryUsage() + int64(unsafe.Sizeof(*lv))
+	if lv.rga != nil {
+		elemOverhead := int64(unsafe.Sizeof(rgaElem{}))
+		for _, e := range lv.rga.elems {
+			size += elemOverhead + int64(len(e.value))
+		}
+	}
+	return size
 }
 
 // IsEmpty returns true if the list is empty

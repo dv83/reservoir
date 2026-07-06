@@ -59,6 +59,9 @@ func newStoredList(list *ListValue) *StoredValue {
 
 // LPush adds elements to the head of a list (O(1) amortized with in-place modification)
 func (s *LockFreeStore) LPush(key string, elements ...string) (int64, error) {
+	if s.isListCRDT() {
+		return s.pushCRDT(key, true, elements...)
+	}
 	if len(elements) == 0 {
 		return 0, fmt.Errorf("wrong number of arguments for 'lpush' command")
 	}
@@ -119,6 +122,9 @@ func (s *LockFreeStore) LPush(key string, elements ...string) (int64, error) {
 
 // RPush adds elements to the tail of a list (O(1) amortized with in-place modification)
 func (s *LockFreeStore) RPush(key string, elements ...string) (int64, error) {
+	if s.isListCRDT() {
+		return s.pushCRDT(key, false, elements...)
+	}
 	if len(elements) == 0 {
 		return 0, fmt.Errorf("wrong number of arguments for 'rpush' command")
 	}
@@ -201,6 +207,9 @@ func (s *LockFreeStore) LPop(key string, count int) ([]string, error) {
 	if count == 0 {
 		count = 1
 	}
+	if s.isListCRDT() {
+		return s.popCRDT(key, count, true)
+	}
 
 	shard := s.getShard(key)
 
@@ -250,6 +259,9 @@ func (s *LockFreeStore) RPop(key string, count int) ([]string, error) {
 	}
 	if count == 0 {
 		count = 1
+	}
+	if s.isListCRDT() {
+		return s.popCRDT(key, count, false)
 	}
 
 	shard := s.getShard(key)
@@ -335,6 +347,9 @@ func (s *LockFreeStore) LIndex(key string, index int64) (string, bool, error) {
 // changing the *StoredValue pointer, so a concurrent push would pass the CAS
 // pointer check and be silently discarded by the swap.
 func (s *LockFreeStore) LSet(key string, index int64, element string) error {
+	if s.isListCRDT() {
+		return s.lsetCRDT(key, index, element)
+	}
 	shard := s.getShard(key)
 
 	shard.mu.Lock()
@@ -362,6 +377,9 @@ func (s *LockFreeStore) LSet(key string, index int64, element string) error {
 
 // LRem removes elements from a list (in-place under the shard write lock).
 func (s *LockFreeStore) LRem(key string, count int64, element string) (int64, error) {
+	if s.isListCRDT() {
+		return s.lremCRDT(key, count, element)
+	}
 	shard := s.getShard(key)
 
 	shard.mu.Lock()
@@ -394,6 +412,9 @@ func (s *LockFreeStore) LRem(key string, count int64, element string) (int64, er
 
 // LTrim trims a list to the specified range (in-place under the shard write lock).
 func (s *LockFreeStore) LTrim(key string, start, stop int64) error {
+	if s.isListCRDT() {
+		return s.ltrimCRDT(key, start, stop)
+	}
 	shard := s.getShard(key)
 
 	shard.mu.Lock()
@@ -428,6 +449,9 @@ func (s *LockFreeStore) LTrim(key string, start, stop int64) error {
 func (s *LockFreeStore) LPushX(key string, elements ...string) (int64, error) {
 	if len(elements) == 0 {
 		return 0, fmt.Errorf("wrong number of arguments for 'lpushx' command")
+	}
+	if s.isListCRDT() {
+		return s.pushXCRDT(key, true, elements...)
 	}
 
 	shard := s.getShard(key)
@@ -465,6 +489,9 @@ func (s *LockFreeStore) LPushX(key string, elements ...string) (int64, error) {
 func (s *LockFreeStore) RPushX(key string, elements ...string) (int64, error) {
 	if len(elements) == 0 {
 		return 0, fmt.Errorf("wrong number of arguments for 'rpushx' command")
+	}
+	if s.isListCRDT() {
+		return s.pushXCRDT(key, false, elements...)
 	}
 
 	shard := s.getShard(key)
@@ -505,6 +532,9 @@ func (s *LockFreeStore) LPushUnique(key string, elements ...string) (int64, erro
 	}
 	if int64(len(key)) > s.limits.MaxKeySize {
 		return 0, errors.NewKeyTooLarge(int64(len(key)), s.limits.MaxKeySize)
+	}
+	if s.isListCRDT() {
+		return s.pushUniqueCRDT(key, true, elements...)
 	}
 
 	shard := s.getShard(key)
@@ -556,6 +586,9 @@ func (s *LockFreeStore) RPushUnique(key string, elements ...string) (int64, erro
 	}
 	if int64(len(key)) > s.limits.MaxKeySize {
 		return 0, errors.NewKeyTooLarge(int64(len(key)), s.limits.MaxKeySize)
+	}
+	if s.isListCRDT() {
+		return s.pushUniqueCRDT(key, false, elements...)
 	}
 
 	shard := s.getShard(key)

@@ -65,6 +65,8 @@ type KVStore interface {
 	LSet(key string, index int64, element string) error
 	LRem(key string, count int64, element string) (int64, error)
 	LTrim(key string, start, stop int64) error
+	DrainListDelta(key string) (ListDelta, bool)
+	ApplyListDelta(key string, delta ListDelta) error
 
 	// Set операції
 	SAdd(key string, members ...string) (int64, error)

@@ -85,7 +85,8 @@ type LockFreeStore struct {
 	commitLogDir      string             // 8 bytes - commit log directory path
 	recoveryActive    uint32             // 4 bytes - atomic flag for recovery mode
 	localOrigin       uint64             // 8 bytes - atomic; this node's id for the counter CRDT (0 = non-cluster, plain INCR)
-	_                 [24]byte           // padding до cache line boundary
+	listSeq           uint64             // 8 bytes - atomic; monotonic source for list CRDT element ids
+	_                 [16]byte           // padding до cache line boundary
 }
 
 // SetLocalOrigin records this node's origin id so INCR/DECR maintain the PN
@@ -105,6 +106,10 @@ func NewLockFreeStore(limits *Limits) *LockFreeStore {
 		expiryBatch:    NewExpiryBatchProcessor(), // batch expiry processor
 		stopCh:         make(chan struct{}),
 		doneCh:         make(chan struct{}),
+		// Seed the list-CRDT id counter from wall-clock nanos so element ids
+		// minted after a restart are always higher than any that survived,
+		// avoiding id collisions with recovered/anti-entropy'd elements.
+		listSeq: uint64(time.Now().UnixNano()),
 	}
 
 	// Initialize deferred scheduler after store is created
