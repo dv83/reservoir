@@ -22,6 +22,8 @@ type KVStore interface {
 	SetLWW(key, value string, physical int64, logical uint32, origin uint64) (bool, error)
 	DeleteLWW(key string, physical int64, logical uint32, origin uint64) bool
 	GetLWW(key string) (physical int64, logical uint32, origin uint64, ok bool)
+	ShardCount() int
+	ShardLWWDigest(shardIdx int) []LWWShardEntry
 	Get(key string) (string, bool)
 	Delete(key string) bool
 	Clear()

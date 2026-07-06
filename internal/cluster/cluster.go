@@ -274,13 +274,14 @@ func (cm *ClusterManager) Start() error {
 	}
 
 	// Start background goroutines
-	cm.wg.Add(6) // heartbeat, election, health, replication, retry, reconciliation
+	cm.wg.Add(7) // heartbeat, election, health, replication, retry, reconciliation, anti-entropy
 	go cm.heartbeatLoop()
 	go cm.electionLoop()
 	go cm.healthCheckLoop()
 	go cm.replicationLoop()
 	go cm.retryLoop()
 	go cm.reconciliationLoop()
+	go cm.antiEntropyLoop()
 
 	logger.Info("Cluster manager started: NodeID=%s, ClusterID=%s",
 		cm.localNode.NodeID, cm.localNode.ClusterID)
@@ -325,6 +326,8 @@ func (cm *ClusterManager) registerHandlers() {
 	cm.transport.RegisterHandler(MsgAppendEntries, cm.handleAppendEntries)
 	cm.transport.RegisterHandler(MsgReplicationPush, cm.handleReplicationPush)
 	cm.transport.RegisterHandler(MsgNodeUpdate, cm.handleNodeUpdate)
+	cm.transport.RegisterHandler(MsgSyncRequest, cm.handleSyncRequest)
+	cm.transport.RegisterHandler(MsgSyncResponse, cm.handleSyncResponse)
 }
 
 // JoinCluster attempts to join an existing cluster

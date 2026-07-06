@@ -75,6 +75,58 @@ func TestApplyReplicationSetLWW(t *testing.T) {
 	}
 }
 
+// reconcile pulls every shard's digest from `from` into `into` under LWW, the
+// same reconciliation handleSyncResponse performs.
+func reconcile(into *StoreReplicationHandler, from *StoreReplicationHandler) {
+	for shard := 0; shard < from.ShardCount(); shard++ {
+		for _, e := range from.LocalDigest(shard) {
+			op := "SET"
+			if e.Deleted {
+				op = "DEL"
+			}
+			_ = into.ApplyReplication(cluster.ReplicationEvent{
+				Operation:   op,
+				Key:         e.Key,
+				Value:       e.Value,
+				HLCPhysical: e.HLCPhysical,
+				HLCLogical:  e.HLCLogical,
+				HLCOrigin:   e.HLCOrigin,
+			})
+		}
+	}
+}
+
+// TestAntiEntropyReconciles verifies that anti-entropy heals divergence: missing
+// keys are pulled, a stale value is upgraded to the newer one, and a tombstone
+// propagates a delete — all under last-write-wins.
+func TestAntiEntropyReconciles(t *testing.T) {
+	a := &StoreReplicationHandler{Store: newReplTestStore()}
+	b := &StoreReplicationHandler{Store: newReplTestStore()}
+
+	// a: has "missing" (b lacks it), a newer "shared", and a deleted "gone".
+	a.Store.SetLWW("missing", "mv", 100, 0, 1)
+	a.Store.SetLWW("shared", "new", 200, 0, 1)
+	a.Store.SetLWW("gone", "x", 50, 0, 1)
+	a.Store.DeleteLWW("gone", 300, 0, 1)
+
+	// b: has an older "shared" and still holds "gone".
+	b.Store.SetLWW("shared", "old", 100, 0, 1)
+	b.Store.SetLWW("gone", "x", 50, 0, 1)
+
+	// Reconcile b from a.
+	reconcile(b, a)
+
+	if v, ok := b.Store.Get("missing"); !ok || v != "mv" {
+		t.Errorf("missing key not pulled: got (%q,%v)", v, ok)
+	}
+	if v, _ := b.Store.Get("shared"); v != "new" {
+		t.Errorf("stale value not upgraded: got %q, want new", v)
+	}
+	if _, ok := b.Store.Get("gone"); ok {
+		t.Errorf("tombstone did not propagate: 'gone' still present")
+	}
+}
+
 // TestApplyReplicationGetSet verifies GETSET replicates as a SET of the new
 // value (GETSET is dispatched through the replication table as an in-place SET).
 func TestApplyReplicationGetSet(t *testing.T) {

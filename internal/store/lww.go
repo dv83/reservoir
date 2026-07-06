@@ -196,6 +196,51 @@ func (s *LockFreeStore) GetLWW(key string) (physical int64, logical uint32, orig
 	return st.TS.Physical, st.TS.Logical, st.Origin, true
 }
 
+// LWWShardEntry is one string key's LWW state (value + stamp) or a tombstone
+// (Deleted=true), used by anti-entropy to reconcile a shard between nodes.
+type LWWShardEntry struct {
+	Key      string
+	Value    string
+	Physical int64
+	Logical  uint32
+	Origin   uint64
+	Deleted  bool
+}
+
+// ShardCount returns the number of shards, so callers can iterate them.
+func (s *LockFreeStore) ShardCount() int { return numShards }
+
+// ShardLWWDigest returns the LWW state of one shard — string values and
+// tombstones with their stamps — for anti-entropy reconciliation. Non-string
+// values are skipped (LWW currently covers string keys).
+func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
+	if shardIdx < 0 || shardIdx >= numShards {
+		return nil
+	}
+	shard := s.shards[shardIdx]
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	entries := make([]LWWShardEntry, 0, len(shard.data)+len(shard.tombstones))
+	for k, v := range shard.data {
+		if v == nil || v.Type != ValueTypeString {
+			continue
+		}
+		entries = append(entries, LWWShardEntry{
+			Key: k, Value: v.StringVal,
+			Physical: v.hlc.TS.Physical, Logical: v.hlc.TS.Logical, Origin: v.hlc.Origin,
+		})
+	}
+	for k, t := range shard.tombstones {
+		entries = append(entries, LWWShardEntry{
+			Key:      k,
+			Physical: t.stamp.TS.Physical, Logical: t.stamp.TS.Logical, Origin: t.stamp.Origin,
+			Deleted: true,
+		})
+	}
+	return entries
+}
+
 // GetHLC returns the LWW stamp recorded for a key, if it exists.
 func (s *LockFreeStore) GetHLC(key string) (hlcStamp, bool) {
 	shard := s.shards[int(FastHash(key)&s.shardMask)]

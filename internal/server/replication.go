@@ -15,6 +15,28 @@ type StoreReplicationHandler struct {
 	Store store.KVStore
 }
 
+// ShardCount reports the store's shard count for anti-entropy rotation.
+func (h *StoreReplicationHandler) ShardCount() int {
+	return h.Store.ShardCount()
+}
+
+// LocalDigest returns the LWW digest of one shard as cluster SyncEntries.
+func (h *StoreReplicationHandler) LocalDigest(shardIdx int) []cluster.SyncEntry {
+	raw := h.Store.ShardLWWDigest(shardIdx)
+	entries := make([]cluster.SyncEntry, 0, len(raw))
+	for _, e := range raw {
+		entries = append(entries, cluster.SyncEntry{
+			Key:         e.Key,
+			Value:       []byte(e.Value),
+			HLCPhysical: e.Physical,
+			HLCLogical:  e.Logical,
+			HLCOrigin:   e.Origin,
+			Deleted:     e.Deleted,
+		})
+	}
+	return entries
+}
+
 // ApplyReplication applies a replication event to the local store
 func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEvent) error {
 	logger.Debug("Applying replication event: Op=%s, Key=%s, EventID=%s", event.Operation, event.Key, event.EventID)
