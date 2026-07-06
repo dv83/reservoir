@@ -124,13 +124,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 	var replicationCallback commands.ReplicationCallback
 	if s.clusterManager != nil {
 		replicationCallback = func(operation, key string, value []byte) {
-			if operation == "SET" {
+			switch operation {
+			case "SET":
 				p, l, o := s.clusterManager.NextStamp()
 				_, _ = s.kvStore.SetLWW(key, string(value), p, l, o)
 				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
-				return
+			case "DEL":
+				p, l, o := s.clusterManager.NextStamp()
+				s.kvStore.DeleteLWW(key, p, l, o)
+				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			default:
+				s.clusterManager.QueueReplication(operation, key, value)
 			}
-			s.clusterManager.QueueReplication(operation, key, value)
 		}
 	}
 

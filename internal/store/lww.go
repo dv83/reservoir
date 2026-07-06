@@ -2,6 +2,7 @@ package store
 
 import (
 	"sync/atomic"
+	"time"
 
 	pkgErrors "reservoir/pkg/errors"
 	"reservoir/pkg/types"
@@ -62,6 +63,12 @@ func (s *LockFreeStore) SetWithHLC(key, value string, stamp hlcStamp) (bool, err
 		shard.mu.Unlock()
 		return false, nil
 	}
+	// Also drop it if the key was deleted more recently (a tombstone that is
+	// newer than this write), so a late older create cannot resurrect the key.
+	if tomb, ok := shard.tombstones[keyCopy]; ok && !stamp.After(tomb.stamp) {
+		shard.mu.Unlock()
+		return false, nil
+	}
 
 	var memoryDelta int64
 	if existed && oldValue != nil {
@@ -74,6 +81,8 @@ func (s *LockFreeStore) SetWithHLC(key, value string, stamp hlcStamp) (bool, err
 		return false, pkgErrors.NewMemoryLimit(atomic.LoadInt64(&s.totalMemory)+memoryDelta, s.limits.MaxMemoryUsage)
 	}
 	shard.data[keyCopy] = newSV
+	// This write supersedes any tombstone for the key.
+	delete(shard.tombstones, keyCopy)
 
 	// A plain SET clears any previous TTL (Redis semantics), under the same lock.
 	if existed {
@@ -104,6 +113,77 @@ func (s *LockFreeStore) SetWithHLC(key, value string, stamp hlcStamp) (bool, err
 // whether the write was applied.
 func (s *LockFreeStore) SetLWW(key, value string, physical int64, logical uint32, origin uint64) (bool, error) {
 	return s.SetWithHLC(key, value, hlcStamp{TS: types.HLCTimestamp{Physical: physical, Logical: logical}, Origin: origin})
+}
+
+// DeleteWithHLC performs a last-write-wins delete: it removes the key and records
+// a tombstone at the given stamp, unless the stored value is strictly newer (in
+// which case the delete is stale and dropped). The tombstone lets a later,
+// older create be rejected instead of resurrecting the key. Returns whether the
+// delete was applied.
+func (s *LockFreeStore) DeleteWithHLC(key string, stamp hlcStamp) bool {
+	shard := s.shards[int(FastHash(key)&s.shardMask)]
+
+	shard.mu.Lock()
+	oldValue, existed := shard.data[key]
+
+	// Drop the delete if a newer write already won.
+	if existed && oldValue != nil && !stamp.After(oldValue.hlc) {
+		shard.mu.Unlock()
+		return false
+	}
+	// Drop it if an equal/newer tombstone already exists.
+	if tomb, ok := shard.tombstones[key]; ok && !stamp.After(tomb.stamp) {
+		shard.mu.Unlock()
+		return false
+	}
+
+	if existed {
+		delete(shard.data, key)
+		shard.expiryMu.Lock()
+		delete(shard.expiry, key)
+		shard.expiryMu.Unlock()
+	}
+	shard.tombstones[key] = tombstone{stamp: stamp, deleted: time.Now()}
+	shard.mu.Unlock()
+
+	if existed {
+		var freed int64
+		if oldValue != nil {
+			freed = oldValue.MemoryUsage()
+		}
+		s.accountKeyRemoved(shard, freed)
+		if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {
+			if cl, ok := s.commitLog.(CommitLogger); ok {
+				cl.Delete([]byte(key))
+			}
+		}
+	}
+	return true
+}
+
+// DeleteLWW is the exported entry point for a last-write-wins delete.
+func (s *LockFreeStore) DeleteLWW(key string, physical int64, logical uint32, origin uint64) bool {
+	return s.DeleteWithHLC(key, hlcStamp{TS: types.HLCTimestamp{Physical: physical, Logical: logical}, Origin: origin})
+}
+
+// gcTombstones removes tombstones older than the retention window. Tombstones
+// only need to outlive the delivery of any concurrent older write; a generous
+// window bounds memory without risking resurrection under normal delivery.
+func (s *LockFreeStore) gcTombstones(retain time.Duration) int {
+	cutoff := time.Now().Add(-retain)
+	removed := 0
+	for i := 0; i < numShards; i++ {
+		shard := s.shards[i]
+		shard.mu.Lock()
+		for k, t := range shard.tombstones {
+			if t.deleted.Before(cutoff) {
+				delete(shard.tombstones, k)
+				removed++
+			}
+		}
+		shard.mu.Unlock()
+	}
+	return removed
 }
 
 // GetLWW returns the HLC stamp recorded for a key as raw fields, for anti-entropy

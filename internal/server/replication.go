@@ -30,6 +30,12 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 		}
 		return h.Store.Set(event.Key, string(event.Value))
 	case "DEL":
+		// Last-write-wins delete: a stamped tombstone so a stale older write can't
+		// resurrect the key. Unstamped events fall back to a plain delete.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			h.Store.DeleteLWW(event.Key, event.HLCPhysical, event.HLCLogical, event.HLCOrigin)
+			return nil
+		}
 		h.Store.Delete(event.Key)
 		return nil
 	case "SADD":

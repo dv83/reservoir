@@ -126,13 +126,17 @@ func HandleZeroCopyDelWithReplication(kvStore store.KVStore, cmd *protocol.ZeroC
 	deleted := int64(0)
 	for i := 0; i < cmd.ArgCount(); i++ {
 		key := expandRandomTemplates(cmd.ArgString(i))
-		if kvStore.Delete(key) {
-			deleted++
-
-			// Replicate the operation if callback is provided
-			if replicate != nil {
-				replicate("DEL", key, nil)
+		if replicate != nil {
+			// Cluster mode: the callback stamps the delete with an HLC and applies
+			// it locally as a tombstone (so a late older write can't resurrect the
+			// key). Count keys that existed at delete time.
+			existed := kvStore.Exists(key) > 0
+			replicate("DEL", key, nil)
+			if existed {
+				deleted++
 			}
+		} else if kvStore.Delete(key) {
+			deleted++
 		}
 	}
 
