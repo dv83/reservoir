@@ -191,6 +191,19 @@ func (s *Server) handleConnection(conn net.Conn) {
 					_, _ = s.kvStore.HSetLWW(key, p, l, o, field, result)
 					s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
 				}
+			case "LPUSH", "RPUSH", "LPUSHX", "RPUSHX", "LPUSHUNIQUE", "RPUSHUNIQUE",
+				"LPOP", "RPOP", "LSET", "LREM", "LTRIM":
+				// The list op already applied to the key's RGA, minting element
+				// ids and/or tombstones. Replicate the resulting descriptors so
+				// peers converge on the same sequence (ids cannot be re-derived
+				// from values, so the raw values path would not converge).
+				if d, ok := s.kvStore.DrainListDelta(key); ok {
+					if enc, err := encodeListDelta(d); err == nil {
+						s.clusterManager.QueueReplication("LDELTA", key, enc)
+					} else {
+						logger.Error("failed to encode list delta for %s: %v", key, err)
+					}
+				}
 			default:
 				s.clusterManager.QueueReplication(operation, key, value)
 			}

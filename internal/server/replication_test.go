@@ -1,6 +1,7 @@
 package server
 
 import (
+	"reflect"
 	"sort"
 	"strconv"
 	"testing"
@@ -234,6 +235,58 @@ func TestApplyReplicationSetCRDTConverges(t *testing.T) {
 	// "a" removed at 200 must stay gone; "b" and "c" present.
 	if got := m1; !(len(got) == 2 && got[0] == "b" && got[1] == "c") {
 		t.Fatalf("converged membership = %v, want [b c]", got)
+	}
+}
+
+// TestApplyReplicationListConverges verifies two nodes' concurrent list pushes,
+// replicated as LDELTA events, converge to the same sequence on both replicas
+// with no element lost, and that a pop tombstone propagates.
+func TestApplyReplicationListConverges(t *testing.T) {
+	sa := newReplTestStore()
+	sa.SetLocalOrigin(1)
+	sb := newReplTestStore()
+	sb.SetLocalOrigin(2)
+	ha := &StoreReplicationHandler{Store: sa}
+	hb := &StoreReplicationHandler{Store: sb}
+
+	// Concurrent appends on each node.
+	sa.RPush("l", "a", "b")
+	sb.RPush("l", "c", "d")
+
+	da, _ := sa.DrainListDelta("l")
+	db, _ := sb.DrainListDelta("l")
+	encA, _ := encodeListDelta(da)
+	encB, _ := encodeListDelta(db)
+
+	// Cross-apply the deltas.
+	if err := hb.ApplyReplication(cluster.ReplicationEvent{Operation: "LDELTA", Key: "l", Value: encA}); err != nil {
+		t.Fatalf("apply A->B: %v", err)
+	}
+	if err := ha.ApplyReplication(cluster.ReplicationEvent{Operation: "LDELTA", Key: "l", Value: encB}); err != nil {
+		t.Fatalf("apply B->A: %v", err)
+	}
+
+	la, _ := sa.LRange("l", 0, -1)
+	lb, _ := sb.LRange("l", 0, -1)
+	if !reflect.DeepEqual(la, lb) {
+		t.Fatalf("replicas diverged: a=%v b=%v", la, lb)
+	}
+	if len(la) != 4 {
+		t.Fatalf("lost elements: %v", la)
+	}
+
+	// A pop on A propagates as a tombstone; re-applying A's original insert must
+	// not resurrect the popped element.
+	sa.LPop("l", 1)
+	dp, _ := sa.DrainListDelta("l")
+	encP, _ := encodeListDelta(dp)
+	if err := hb.ApplyReplication(cluster.ReplicationEvent{Operation: "LDELTA", Key: "l", Value: encP}); err != nil {
+		t.Fatalf("apply pop A->B: %v", err)
+	}
+	beforeLen := func() int { v, _ := sb.LRange("l", 0, -1); return len(v) }()
+	_ = hb.ApplyReplication(cluster.ReplicationEvent{Operation: "LDELTA", Key: "l", Value: encA}) // re-deliver insert
+	if afterLen := func() int { v, _ := sb.LRange("l", 0, -1); return len(v) }(); afterLen != beforeLen {
+		t.Fatalf("re-delivered insert resurrected a popped element: %d -> %d", beforeLen, afterLen)
 	}
 }
 

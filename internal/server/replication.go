@@ -29,6 +29,23 @@ func decodeCounterState(value []byte) (store.CounterState, error) {
 	return st, err
 }
 
+// encodeListDelta serializes a list CRDT delta for the "LDELTA" replication
+// payload.
+func encodeListDelta(d store.ListDelta) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(d); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// decodeListDelta parses an "LDELTA" replication payload back into a delta.
+func decodeListDelta(value []byte) (store.ListDelta, error) {
+	var d store.ListDelta
+	err := gob.NewDecoder(bytes.NewReader(value)).Decode(&d)
+	return d, err
+}
+
 // StoreReplicationHandler implements cluster.ReplicationHandler
 type StoreReplicationHandler struct {
 	Store store.KVStore
@@ -343,6 +360,15 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 			return nil
 		}
 		return h.Store.LTrim(event.Key, start, stop)
+	case "LDELTA":
+		// Convergent list delta: RGA element inserts/updates and tombstones,
+		// applied idempotently so lists converge regardless of order.
+		d, err := decodeListDelta(event.Value)
+		if err != nil {
+			logger.Warning("Invalid LDELTA replication data for %s: %v", event.Key, err)
+			return nil
+		}
+		return h.Store.ApplyListDelta(event.Key, d)
 	case "COUNTER":
 		// Convergent PN-counter state: max-merge into the local counter so
 		// concurrent increments from any node are all preserved.
