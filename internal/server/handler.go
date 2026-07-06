@@ -116,11 +116,47 @@ func (s *Server) handleConnection(conn net.Conn) {
 	parser := protocol.NewZeroCopyParser()
 	defer parser.Release() // Return buffer to pool when done
 
-	// Pre-create replication callback once per connection (optimization)
+	// Pre-create replication callback once per connection (optimization).
+	// SET is resolved by last-write-wins: it is stamped with a single HLC used
+	// for both the local apply and the replicated event, so all replicas
+	// converge. Other operations keep the plain queue-only path (the handler has
+	// already applied them locally).
 	var replicationCallback commands.ReplicationCallback
 	if s.clusterManager != nil {
 		replicationCallback = func(operation, key string, value []byte) {
-			s.clusterManager.QueueReplication(operation, key, value)
+			switch operation {
+			case "SET":
+				p, l, o := s.clusterManager.NextStamp()
+				_, _ = s.kvStore.SetLWW(key, string(value), p, l, o)
+				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			case "DEL":
+				p, l, o := s.clusterManager.NextStamp()
+				s.kvStore.DeleteLWW(key, p, l, o)
+				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			case "SADD":
+				// Element-level CRDT: stamp each member so concurrent add/remove
+				// across nodes converges. The handler already applied the plain
+				// add (for the reply count); this records the element stamps.
+				p, l, o := s.clusterManager.NextStamp()
+				if members := membersFromReplData(value); len(members) > 0 {
+					_, _ = s.kvStore.SAddLWW(key, p, l, o, members...)
+				}
+				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			case "SREM":
+				p, l, o := s.clusterManager.NextStamp()
+				if members := membersFromReplData(value); len(members) > 0 {
+					_, _ = s.kvStore.SRemLWW(key, p, l, o, members...)
+				}
+				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			case "SPOP":
+				// SPOP removes a specific element; value is that element. Record a
+				// stamped tombstone so the removal converges like an SREM.
+				p, l, o := s.clusterManager.NextStamp()
+				_, _ = s.kvStore.SRemLWW(key, p, l, o, string(value))
+				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+			default:
+				s.clusterManager.QueueReplication(operation, key, value)
+			}
 		}
 	}
 

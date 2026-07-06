@@ -197,12 +197,15 @@ func (c *Compactor) writeCompactedSegment(state map[string]*Entry, oldestSegment
 		},
 	}
 
-	// Write all entries
+	// Write all entries, PRESERVING each entry's original timestamp. Recovery
+	// sorts every entry across all segments by timestamp, so stamping compacted
+	// entries with time.Now() would make these (old) last-write values appear
+	// newer than writes already recorded in the live current segment and
+	// resurrect stale data. Each state[key] entry already holds the timestamp of
+	// that key's most recent write, which is exactly where it must sort.
 	for _, key := range keys {
 		entry := state[key]
-		// Update timestamp to preserve ordering
-		entry.Timestamp = time.Now().UnixNano()
-		entry.CRC = entry.CalculateCRC()
+		entry.CRC = entry.CalculateCRC() // CRC is unchanged, recomputed defensively
 
 		if err := cl.writeEntry(entry); err != nil {
 			return "", fmt.Errorf("failed to write entry: %w", err)

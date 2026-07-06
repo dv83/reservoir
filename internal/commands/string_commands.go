@@ -50,11 +50,13 @@ func HandleZeroCopySetWithReplication(kvStore store.KVStore, cmd *protocol.ZeroC
 
 	// ULTRA FAST PATH: plain "SET key value" with no options.
 	if argc == 2 {
-		if err := kvStore.Set(key, value); err != nil {
-			return writeError(writer, err.Error())
-		}
 		if replicate != nil {
+			// Cluster mode: the replication callback stamps the write with an HLC
+			// and applies it locally under last-write-wins (so it also serves as
+			// the local write). See the callback in server/handler.go.
 			replicate("SET", key, []byte(value))
+		} else if err := kvStore.Set(key, value); err != nil {
+			return writeError(writer, err.Error())
 		}
 		_, err := writer.Write(okResponse)
 		return err
@@ -124,13 +126,17 @@ func HandleZeroCopyDelWithReplication(kvStore store.KVStore, cmd *protocol.ZeroC
 	deleted := int64(0)
 	for i := 0; i < cmd.ArgCount(); i++ {
 		key := expandRandomTemplates(cmd.ArgString(i))
-		if kvStore.Delete(key) {
-			deleted++
-
-			// Replicate the operation if callback is provided
-			if replicate != nil {
-				replicate("DEL", key, nil)
+		if replicate != nil {
+			// Cluster mode: the callback stamps the delete with an HLC and applies
+			// it locally as a tombstone (so a late older write can't resurrect the
+			// key). Count keys that existed at delete time.
+			existed := kvStore.Exists(key) > 0
+			replicate("DEL", key, nil)
+			if existed {
+				deleted++
 			}
+		} else if kvStore.Delete(key) {
+			deleted++
 		}
 	}
 

@@ -142,43 +142,71 @@ func (r *Reader) readEntry(reader *bufio.Reader) (*Entry, error) {
 		return nil, err
 	}
 
-	// Parse entry
+	// Parse entry. Every field read is bounds-checked against the buffer: a
+	// corrupt or truncated entry (an internal length field larger than the data)
+	// must return an error, not panic — a panic during recovery would crash the
+	// whole server rather than being skipped as corruption by readSegment.
 	entry := &Entry{}
 	pos := 0
 
-	// Type
+	// need reports whether n more bytes are available from pos.
+	need := func(n int) bool { return pos+n <= len(data) }
+
+	// Type (1) + Timestamp (8)
+	if !need(1 + 8) {
+		return nil, fmt.Errorf("truncated entry header")
+	}
 	entry.Type = data[pos]
 	pos++
-
-	// Timestamp
 	entry.Timestamp = int64(binary.BigEndian.Uint64(data[pos : pos+8]))
 	pos += 8
 
 	// Operation length and operation
-	operationLen := binary.BigEndian.Uint16(data[pos : pos+2])
+	if !need(2) {
+		return nil, fmt.Errorf("truncated operation length")
+	}
+	operationLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
 	pos += 2
+	if !need(operationLen) {
+		return nil, fmt.Errorf("operation length %d exceeds entry", operationLen)
+	}
 	if operationLen > 0 {
-		entry.Operation = string(data[pos : pos+int(operationLen)])
-		pos += int(operationLen)
+		entry.Operation = string(data[pos : pos+operationLen])
+		pos += operationLen
 	}
 
 	// Key length and key
-	keyLen := binary.BigEndian.Uint16(data[pos : pos+2])
+	if !need(2) {
+		return nil, fmt.Errorf("truncated key length")
+	}
+	keyLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
 	pos += 2
+	if !need(keyLen) {
+		return nil, fmt.Errorf("key length %d exceeds entry", keyLen)
+	}
 	entry.Key = make([]byte, keyLen)
-	copy(entry.Key, data[pos:pos+int(keyLen)])
-	pos += int(keyLen)
+	copy(entry.Key, data[pos:pos+keyLen])
+	pos += keyLen
 
 	// Value length and value
-	valueLen := binary.BigEndian.Uint32(data[pos : pos+4])
+	if !need(4) {
+		return nil, fmt.Errorf("truncated value length")
+	}
+	valueLen := int(binary.BigEndian.Uint32(data[pos : pos+4]))
 	pos += 4
+	if valueLen < 0 || !need(valueLen) {
+		return nil, fmt.Errorf("value length %d exceeds entry", valueLen)
+	}
 	if valueLen > 0 {
 		entry.Value = make([]byte, valueLen)
-		copy(entry.Value, data[pos:pos+int(valueLen)])
-		pos += int(valueLen)
+		copy(entry.Value, data[pos:pos+valueLen])
+		pos += valueLen
 	}
 
 	// CRC
+	if !need(4) {
+		return nil, fmt.Errorf("truncated CRC")
+	}
 	entry.CRC = binary.BigEndian.Uint32(data[pos : pos+4])
 
 	return entry, nil

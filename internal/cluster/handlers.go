@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"reservoir/pkg/logger"
+	"reservoir/pkg/types"
 )
 
 // handleHeartbeat processes heartbeat messages
@@ -348,6 +349,12 @@ func (cm *ClusterManager) handleReplicationPush(msg *Message) error {
 	for _, event := range push.Events {
 		logger.Debug("Received replication event: op=%s, key=%s, from=%s",
 			event.Operation, event.Key, event.NodeID)
+
+		// Advance the local hybrid logical clock past the event's stamp so this
+		// node's future writes are ordered after everything it has observed.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			cm.hlc.Update(types.HLCTimestamp{Physical: event.HLCPhysical, Logical: event.HLCLogical})
+		}
 
 		// Apply replication if handler is set
 		if cm.replicationHandler != nil {

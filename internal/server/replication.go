@@ -15,13 +15,61 @@ type StoreReplicationHandler struct {
 	Store store.KVStore
 }
 
+// membersFromReplData extracts the members from the null-separated set
+// replication encoding "key\x00member1\x00member2\x00...". It returns nil when
+// no members are present.
+func membersFromReplData(value []byte) []string {
+	parts := strings.Split(string(value), "\x00")
+	if len(parts) < 2 {
+		return nil
+	}
+	return parts[1:]
+}
+
+// ShardCount reports the store's shard count for anti-entropy rotation.
+func (h *StoreReplicationHandler) ShardCount() int {
+	return h.Store.ShardCount()
+}
+
+// LocalDigest returns the LWW digest of one shard as cluster SyncEntries.
+func (h *StoreReplicationHandler) LocalDigest(shardIdx int) []cluster.SyncEntry {
+	raw := h.Store.ShardLWWDigest(shardIdx)
+	entries := make([]cluster.SyncEntry, 0, len(raw))
+	for _, e := range raw {
+		entries = append(entries, cluster.SyncEntry{
+			Key:         e.Key,
+			Member:      e.Member,
+			Value:       []byte(e.Value),
+			HLCPhysical: e.Physical,
+			HLCLogical:  e.Logical,
+			HLCOrigin:   e.Origin,
+			Deleted:     e.Deleted,
+		})
+	}
+	return entries
+}
+
 // ApplyReplication applies a replication event to the local store
 func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEvent) error {
 	logger.Debug("Applying replication event: Op=%s, Key=%s, EventID=%s", event.Operation, event.Key, event.EventID)
 	switch event.Operation {
 	case "SET":
+		// Last-write-wins: apply the value only if the event's HLC stamp is newer
+		// than what we hold. A stamped event (HLC set) goes through SetLWW so
+		// concurrent writes converge; unstamped events (older senders) fall back
+		// to a plain Set.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			_, err := h.Store.SetLWW(event.Key, string(event.Value), event.HLCPhysical, event.HLCLogical, event.HLCOrigin)
+			return err
+		}
 		return h.Store.Set(event.Key, string(event.Value))
 	case "DEL":
+		// Last-write-wins delete: a stamped tombstone so a stale older write can't
+		// resurrect the key. Unstamped events fall back to a plain delete.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			h.Store.DeleteLWW(event.Key, event.HLCPhysical, event.HLCLogical, event.HLCOrigin)
+			return nil
+		}
 		h.Store.Delete(event.Key)
 		return nil
 	case "SADD":
@@ -32,6 +80,12 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 			return nil
 		}
 		members := parts[1:]
+		// Element-level CRDT: a stamped event converges under last-write-wins;
+		// unstamped events (older senders) fall back to a plain add.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			_, err := h.Store.SAddLWW(event.Key, event.HLCPhysical, event.HLCLogical, event.HLCOrigin, members...)
+			return err
+		}
 		_, err := h.Store.SAdd(event.Key, members...)
 		return err
 	case "SREM":
@@ -41,6 +95,10 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 			return nil
 		}
 		members := parts[1:]
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			_, err := h.Store.SRemLWW(event.Key, event.HLCPhysical, event.HLCLogical, event.HLCOrigin, members...)
+			return err
+		}
 		_, err := h.Store.SRem(event.Key, members...)
 		return err
 	case "MSET":
@@ -99,6 +157,12 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 		return err
 	case "SPOP":
 		element := string(event.Value)
+		// SPOP replicates as a removal of the specific popped element; a stamped
+		// event records a converging tombstone, like SREM.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			_, err := h.Store.SRemLWW(event.Key, event.HLCPhysical, event.HLCLogical, event.HLCOrigin, element)
+			return err
+		}
 		_, err := h.Store.SRem(event.Key, element)
 		return err
 	case "SDIFFSTORE":

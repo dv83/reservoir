@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
@@ -62,6 +63,12 @@ type ClusterManager struct {
 	statePath string
 	stateMu   sync.Mutex
 
+	// hlc stamps writes for multi-master last-write-wins conflict resolution;
+	// origin is this node's id compressed to a uint64 to break exact-timestamp
+	// ties deterministically across nodes.
+	hlc    *types.HLC
+	origin uint64
+
 	// Replication queue (inspired by DragonflyDB's approach)
 	replicationQueue   chan ReplicationEvent
 	replicationHandler ReplicationHandler
@@ -96,6 +103,19 @@ type ReplicationEvent struct {
 	NodeID    UUIDv7    `json:"node_id"`
 	Clock     uint64    `json:"clock"`
 	EventID   string    `json:"event_id"` // Unique identifier for deduplication
+
+	// Hybrid logical clock stamp for last-write-wins conflict resolution.
+	HLCPhysical int64  `json:"hlc_p"`
+	HLCLogical  uint32 `json:"hlc_l"`
+	HLCOrigin   uint64 `json:"hlc_o"`
+}
+
+// NextStamp returns a fresh last-write-wins stamp (HLC timestamp + this node's
+// origin id) for a locally-originated write. The same stamp must be used for the
+// local apply and the replicated event so every replica converges.
+func (cm *ClusterManager) NextStamp() (physical int64, logical uint32, origin uint64) {
+	ts := cm.hlc.Now()
+	return ts.Physical, ts.Logical, cm.origin
 }
 
 // FailedReplicationEvent represents a failed replication attempt with retry logic.
@@ -137,6 +157,8 @@ func NewClusterManager(address string, port int, clusterID UUIDv7) *ClusterManag
 		retryQueue:       make(chan *FailedReplicationEvent, 10000),
 		cachedTime:       types.NewCachedTimestamp(),
 		voters:           make(map[UUIDv7]struct{}),
+		hlc:              types.NewHLC(),
+		origin:           binary.BigEndian.Uint64(localNode.NodeID[:8]),
 		stopCh:           make(chan struct{}),
 	}
 
@@ -252,13 +274,14 @@ func (cm *ClusterManager) Start() error {
 	}
 
 	// Start background goroutines
-	cm.wg.Add(6) // heartbeat, election, health, replication, retry, reconciliation
+	cm.wg.Add(7) // heartbeat, election, health, replication, retry, reconciliation, anti-entropy
 	go cm.heartbeatLoop()
 	go cm.electionLoop()
 	go cm.healthCheckLoop()
 	go cm.replicationLoop()
 	go cm.retryLoop()
 	go cm.reconciliationLoop()
+	go cm.antiEntropyLoop()
 
 	logger.Info("Cluster manager started: NodeID=%s, ClusterID=%s",
 		cm.localNode.NodeID, cm.localNode.ClusterID)
@@ -303,6 +326,8 @@ func (cm *ClusterManager) registerHandlers() {
 	cm.transport.RegisterHandler(MsgAppendEntries, cm.handleAppendEntries)
 	cm.transport.RegisterHandler(MsgReplicationPush, cm.handleReplicationPush)
 	cm.transport.RegisterHandler(MsgNodeUpdate, cm.handleNodeUpdate)
+	cm.transport.RegisterHandler(MsgSyncRequest, cm.handleSyncRequest)
+	cm.transport.RegisterHandler(MsgSyncResponse, cm.handleSyncResponse)
 }
 
 // JoinCluster attempts to join an existing cluster
@@ -625,8 +650,19 @@ func (cm *ClusterManager) trackReplicationFailure(event ReplicationEvent, nodeID
 	}
 }
 
+// QueueReplicationLWW queues a write carrying a pre-generated last-write-wins
+// stamp (from NextStamp), so the replicated event and the sender's local apply
+// share one stamp.
+func (cm *ClusterManager) QueueReplicationLWW(op string, key string, value []byte, physical int64, logical uint32, origin uint64) {
+	cm.queueReplication(op, key, value, physical, logical, origin)
+}
+
 // QueueReplication queues a replication event with reliable delivery guarantees
 func (cm *ClusterManager) QueueReplication(op string, key string, value []byte) {
+	cm.queueReplication(op, key, value, 0, 0, 0)
+}
+
+func (cm *ClusterManager) queueReplication(op string, key string, value []byte, hlcP int64, hlcL uint32, hlcO uint64) {
 	// OPTIMIZED: Increment vector clock using lock-free atomic operation
 	var clock uint64
 	if cm.localNode.OptimizedVectorClock != nil {
@@ -647,13 +683,16 @@ func (cm *ClusterManager) QueueReplication(op string, key string, value []byte) 
 
 	logger.Debug("Queueing replication: ID=%s, Op=%s, Key=%s, ValueSize=%d", eventID, op, key, len(value))
 	event := ReplicationEvent{
-		Operation: op,
-		Key:       key,
-		Value:     value,
-		Timestamp: timestamp,
-		NodeID:    cm.localNode.NodeID,
-		Clock:     clock,
-		EventID:   eventID,
+		Operation:   op,
+		Key:         key,
+		Value:       value,
+		Timestamp:   timestamp,
+		NodeID:      cm.localNode.NodeID,
+		Clock:       clock,
+		EventID:     eventID,
+		HLCPhysical: hlcP,
+		HLCLogical:  hlcL,
+		HLCOrigin:   hlcO,
 	}
 
 	// Try fast path first (non-blocking)

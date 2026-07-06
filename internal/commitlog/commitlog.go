@@ -32,7 +32,30 @@ const (
 	EntryTypeWrite  = byte(0x01)
 	EntryTypeDelete = byte(0x02)
 	EntryTypeMeta   = byte(0x03)
+
+	// Format limits. Operation and key lengths are encoded as uint16 on disk, so
+	// values beyond this would silently truncate. MaxEntrySize matches the
+	// reader's cap so we never write an entry the reader would reject as corrupt.
+	MaxFieldLen  = 65535
+	MaxEntrySize = 10 * 1024 * 1024
 )
+
+// validateEntrySizes rejects an entry that cannot be encoded and recovered
+// losslessly: an operation/key beyond the uint16 length field, or a total entry
+// larger than the reader's maximum.
+func validateEntrySizes(operation string, key, value []byte) error {
+	if len(operation) > MaxFieldLen {
+		return fmt.Errorf("commit log: operation too long (%d bytes, max %d)", len(operation), MaxFieldLen)
+	}
+	if len(key) > MaxFieldLen {
+		return fmt.Errorf("commit log: key too long (%d bytes, max %d)", len(key), MaxFieldLen)
+	}
+	total := 1 + 8 + 2 + len(operation) + 2 + len(key) + 4 + len(value) + 4
+	if total > MaxEntrySize {
+		return fmt.Errorf("commit log: entry too large (%d bytes, max %d)", total, MaxEntrySize)
+	}
+	return nil
+}
 
 // Entry represents a single write operation in the commit log
 type Entry struct {
@@ -144,6 +167,10 @@ func (cl *CommitLog) Write(operation string, key []byte, value []byte) error {
 		return errors.New("commit log is closed")
 	}
 	cl.mu.RUnlock()
+
+	if err := validateEntrySizes(operation, key, value); err != nil {
+		return err
+	}
 
 	entry := &Entry{
 		Type:      EntryTypeWrite,

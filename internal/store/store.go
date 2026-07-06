@@ -46,7 +46,17 @@ type LockFreeShard struct {
 	// COLD DATA: рідко використовувані поля (expiry operations)
 	expiryMu sync.RWMutex         // 24 bytes
 	expiry   map[string]time.Time // 8 bytes (pointer)
-	_        [32]byte             // padding до cache line boundary
+
+	// tombstones records the LWW stamp of deleted keys (guarded by mu) so a
+	// late-arriving older write cannot resurrect a key deleted more recently.
+	// Only consulted by the LWW set/delete paths; GC'd by age.
+	tombstones map[string]tombstone
+}
+
+// tombstone marks a key as deleted at a given LWW stamp, retained until GC.
+type tombstone struct {
+	stamp   hlcStamp
+	deleted time.Time
 }
 
 // LockFreeStore - оптимізована версія Store з lock-free операціями
@@ -97,8 +107,9 @@ func NewLockFreeStore(limits *Limits) *LockFreeStore {
 
 	for i := 0; i < numShards; i++ {
 		store.shards[i] = &LockFreeShard{
-			data:   make(map[string]*StoredValue),
-			expiry: make(map[string]time.Time),
+			data:       make(map[string]*StoredValue),
+			expiry:     make(map[string]time.Time),
+			tombstones: make(map[string]tombstone),
 		}
 	}
 
@@ -618,6 +629,9 @@ func (s *LockFreeStore) startExpirationCleanup() {
 			return
 		case <-ticker.C:
 			s.cleanupExpiredKeys()
+			// Reap tombstones that have outlived any plausibly-delayed concurrent
+			// write, bounding their memory. An hour is far beyond normal delivery.
+			s.gcTombstones(time.Hour)
 		}
 	}
 }
