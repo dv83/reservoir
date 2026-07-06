@@ -97,14 +97,26 @@ func (cm *ClusterManager) handleSyncResponse(msg *Message) error {
 	}
 
 	for _, e := range resp.Entries {
-		op := "SET"
-		if e.Deleted {
+		var op string
+		value := e.Value
+		if e.Member != "" {
+			// Set element: SADD if present, SREM if tombstoned. The apply path
+			// expects the null-separated "key\x00member" encoding.
+			if e.Deleted {
+				op = "SREM"
+			} else {
+				op = "SADD"
+			}
+			value = []byte(e.Key + "\x00" + e.Member)
+		} else if e.Deleted {
 			op = "DEL"
+		} else {
+			op = "SET"
 		}
 		event := ReplicationEvent{
 			Operation:   op,
 			Key:         e.Key,
-			Value:       e.Value,
+			Value:       value,
 			HLCPhysical: e.HLCPhysical,
 			HLCLogical:  e.HLCLogical,
 			HLCOrigin:   e.HLCOrigin,

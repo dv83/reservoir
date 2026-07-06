@@ -38,6 +38,7 @@ func (h *StoreReplicationHandler) LocalDigest(shardIdx int) []cluster.SyncEntry 
 	for _, e := range raw {
 		entries = append(entries, cluster.SyncEntry{
 			Key:         e.Key,
+			Member:      e.Member,
 			Value:       []byte(e.Value),
 			HLCPhysical: e.Physical,
 			HLCLogical:  e.Logical,

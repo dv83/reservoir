@@ -132,6 +132,44 @@ func (sv *SetValue) RemoveWithStamp(elem string, st hlcStamp) bool {
 	return sv.syncMember(elem)
 }
 
+// appendLWWDigest appends this set's per-element LWW winners to out as digest
+// entries under setKey: a present member carries its add stamp (Deleted=false),
+// a tombstoned element carries its remove stamp (Deleted=true). Sending only the
+// winner per element is enough for anti-entropy to converge, since each pull
+// propagates the stamp that would win on the peer too. A set without a CRDT
+// (only ever touched by the plain path) reports its members at the zero stamp.
+func (sv *SetValue) appendLWWDigest(setKey string, out []LWWShardEntry) []LWWShardEntry {
+	sv.mu.RLock()
+	defer sv.mu.RUnlock()
+
+	if sv.crdt == nil {
+		for elem := range sv.Elements {
+			out = append(out, LWWShardEntry{Key: setKey, Member: elem})
+		}
+		return out
+	}
+
+	emit := func(elem string) LWWShardEntry {
+		if sv.crdt.contains(elem) {
+			st := sv.crdt.adds[elem]
+			return LWWShardEntry{Key: setKey, Member: elem, Physical: st.TS.Physical, Logical: st.TS.Logical, Origin: st.Origin}
+		}
+		st := sv.crdt.removes[elem]
+		return LWWShardEntry{Key: setKey, Member: elem, Physical: st.TS.Physical, Logical: st.TS.Logical, Origin: st.Origin, Deleted: true}
+	}
+
+	for elem := range sv.crdt.adds {
+		out = append(out, emit(elem))
+	}
+	for elem := range sv.crdt.removes {
+		if _, isAdd := sv.crdt.adds[elem]; isAdd {
+			continue // already emitted from the adds set
+		}
+		out = append(out, emit(elem))
+	}
+	return out
+}
+
 // --- Store-level last-write-wins set operations ---
 
 // SAddLWW is the convergent entry point for SADD, used by the cluster path

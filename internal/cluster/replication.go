@@ -13,10 +13,14 @@ type ReplicationHandler interface {
 	LocalDigest(shardIdx int) []SyncEntry
 }
 
-// SyncEntry is one key's LWW state exchanged during anti-entropy: a value with
-// its HLC stamp, or a tombstone (Deleted=true).
+// SyncEntry is one LWW-stamped fact exchanged during anti-entropy. With
+// Member=="" it is a string key's state — a value with its HLC stamp, or a
+// tombstone (Deleted=true). With Member!="" it is a single set element that is
+// present (Deleted=false, stamp is its add) or tombstoned (Deleted=true, stamp
+// is its remove).
 type SyncEntry struct {
 	Key         string `json:"key"`
+	Member      string `json:"member,omitempty"`
 	Value       []byte `json:"value,omitempty"`
 	HLCPhysical int64  `json:"hlc_p"`
 	HLCLogical  uint32 `json:"hlc_l"`

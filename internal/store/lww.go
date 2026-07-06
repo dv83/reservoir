@@ -196,10 +196,14 @@ func (s *LockFreeStore) GetLWW(key string) (physical int64, logical uint32, orig
 	return st.TS.Physical, st.TS.Logical, st.Origin, true
 }
 
-// LWWShardEntry is one string key's LWW state (value + stamp) or a tombstone
-// (Deleted=true), used by anti-entropy to reconcile a shard between nodes.
+// LWWShardEntry is one LWW-stamped fact exchanged during anti-entropy. It is
+// either a string key's state (Member=="") — a value or a tombstone
+// (Deleted=true) — or a single set element (Member!="") that is currently
+// present (Deleted=false, stamp is its add) or tombstoned (Deleted=true, stamp
+// is its remove).
 type LWWShardEntry struct {
 	Key      string
+	Member   string
 	Value    string
 	Physical int64
 	Logical  uint32
@@ -223,13 +227,20 @@ func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
 
 	entries := make([]LWWShardEntry, 0, len(shard.data)+len(shard.tombstones))
 	for k, v := range shard.data {
-		if v == nil || v.Type != ValueTypeString {
+		if v == nil {
 			continue
 		}
-		entries = append(entries, LWWShardEntry{
-			Key: k, Value: v.StringVal,
-			Physical: v.hlc.TS.Physical, Logical: v.hlc.TS.Logical, Origin: v.hlc.Origin,
-		})
+		switch v.Type {
+		case ValueTypeString:
+			entries = append(entries, LWWShardEntry{
+				Key: k, Value: v.StringVal,
+				Physical: v.hlc.TS.Physical, Logical: v.hlc.TS.Logical, Origin: v.hlc.Origin,
+			})
+		case ValueTypeSet:
+			if v.SetVal != nil {
+				entries = v.SetVal.appendLWWDigest(k, entries)
+			}
+		}
 	}
 	for k, t := range shard.tombstones {
 		entries = append(entries, LWWShardEntry{

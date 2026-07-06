@@ -77,18 +77,30 @@ func TestApplyReplicationSetLWW(t *testing.T) {
 }
 
 // reconcile pulls every shard's digest from `from` into `into` under LWW, the
-// same reconciliation handleSyncResponse performs.
+// same reconciliation handleSyncResponse performs (including set-element
+// routing).
 func reconcile(into *StoreReplicationHandler, from *StoreReplicationHandler) {
 	for shard := 0; shard < from.ShardCount(); shard++ {
 		for _, e := range from.LocalDigest(shard) {
-			op := "SET"
-			if e.Deleted {
+			var op string
+			value := e.Value
+			switch {
+			case e.Member != "":
+				if e.Deleted {
+					op = "SREM"
+				} else {
+					op = "SADD"
+				}
+				value = []byte(e.Key + "\x00" + e.Member)
+			case e.Deleted:
 				op = "DEL"
+			default:
+				op = "SET"
 			}
 			_ = into.ApplyReplication(cluster.ReplicationEvent{
 				Operation:   op,
 				Key:         e.Key,
-				Value:       e.Value,
+				Value:       value,
 				HLCPhysical: e.HLCPhysical,
 				HLCLogical:  e.HLCLogical,
 				HLCOrigin:   e.HLCOrigin,
@@ -125,6 +137,35 @@ func TestAntiEntropyReconciles(t *testing.T) {
 	}
 	if _, ok := b.Store.Get("gone"); ok {
 		t.Errorf("tombstone did not propagate: 'gone' still present")
+	}
+}
+
+// TestAntiEntropyReconcilesSet verifies anti-entropy heals set divergence from a
+// dropped element op: a missing member is pulled, and a member removed on the
+// source (tombstoned) is removed on the target even though the target still held
+// it — all through the set digest under last-write-wins.
+func TestAntiEntropyReconcilesSet(t *testing.T) {
+	a := &StoreReplicationHandler{Store: newReplTestStore()}
+	b := &StoreReplicationHandler{Store: newReplTestStore()}
+
+	// a: added x and y, then removed y (tombstone at 200).
+	a.Store.SAddLWW("s", 100, 0, 1, "x", "y")
+	a.Store.SRemLWW("s", 200, 0, 1, "y")
+
+	// b: only ever saw the original add of x and y (missed a's later ops).
+	b.Store.SAddLWW("s", 100, 0, 1, "x", "y")
+
+	reconcile(b, a)
+
+	got, _ := b.Store.SMembers("s")
+	sort.Strings(got)
+	if len(got) != 1 || got[0] != "x" {
+		t.Fatalf("after reconcile, members = %v, want [x]", got)
+	}
+	// The tombstone must persist: a stale re-add of y cannot resurrect it.
+	b.Store.SAddLWW("s", 150, 0, 1, "y")
+	if m, _ := b.Store.SIsMember("s", "y"); m {
+		t.Fatal("stale add resurrected tombstoned member 'y' after reconcile")
 	}
 }
 
