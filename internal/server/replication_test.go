@@ -87,6 +87,14 @@ func reconcile(into *StoreReplicationHandler, from *StoreReplicationHandler) {
 			switch {
 			case e.Counter:
 				op = "COUNTER"
+			case e.Hash:
+				if e.Deleted {
+					op = "HDEL"
+					value = []byte(e.Key + "\x00" + e.Member)
+				} else {
+					op = "HSET"
+					value = []byte(e.Key + "\x00" + e.Member + "\x00" + string(e.Value))
+				}
 			case e.Member != "":
 				if e.Deleted {
 					op = "SREM"
@@ -226,6 +234,36 @@ func TestApplyReplicationSetCRDTConverges(t *testing.T) {
 	// "a" removed at 200 must stay gone; "b" and "c" present.
 	if got := m1; !(len(got) == 2 && got[0] == "b" && got[1] == "c") {
 		t.Fatalf("converged membership = %v, want [b c]", got)
+	}
+}
+
+// TestAntiEntropyReconcilesHash verifies anti-entropy heals hash divergence from
+// a dropped field op: a missing field is pulled, a stale value is upgraded, and
+// a deleted field (tombstoned) is removed on the target that still held it.
+func TestAntiEntropyReconcilesHash(t *testing.T) {
+	a := &StoreReplicationHandler{Store: newReplTestStore()}
+	b := &StoreReplicationHandler{Store: newReplTestStore()}
+
+	// a: has "missing" (b lacks it), a newer "shared", and a deleted "gone".
+	a.Store.HSetLWW("h", 100, 0, 1, "missing", "mv")
+	a.Store.HSetLWW("h", 200, 0, 1, "shared", "new")
+	a.Store.HSetLWW("h", 50, 0, 1, "gone", "x")
+	a.Store.HDelLWW("h", 300, 0, 1, "gone")
+
+	// b: has an older "shared" and still holds "gone".
+	b.Store.HSetLWW("h", 100, 0, 1, "shared", "old")
+	b.Store.HSetLWW("h", 50, 0, 1, "gone", "x")
+
+	reconcile(b, a)
+
+	if v, ok, _ := b.Store.HGet("h", "missing"); !ok || v != "mv" {
+		t.Errorf("missing field not pulled: got (%q,%v)", v, ok)
+	}
+	if v, _, _ := b.Store.HGet("h", "shared"); v != "new" {
+		t.Errorf("stale value not upgraded: got %q, want new", v)
+	}
+	if _, ok, _ := b.Store.HGet("h", "gone"); ok {
+		t.Errorf("tombstone did not propagate: 'gone' still present")
 	}
 }
 

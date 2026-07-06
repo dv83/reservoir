@@ -102,6 +102,16 @@ func (cm *ClusterManager) handleSyncResponse(msg *Message) error {
 		if e.Counter {
 			// PN-counter state; apply path max-merges it.
 			op = "COUNTER"
+		} else if e.Hash {
+			// Hash field: HSET if present, HDEL if tombstoned. The apply path
+			// expects "key\x00field[\x00value]".
+			if e.Deleted {
+				op = "HDEL"
+				value = []byte(e.Key + "\x00" + e.Member)
+			} else {
+				op = "HSET"
+				value = []byte(e.Key + "\x00" + e.Member + "\x00" + string(e.Value))
+			}
 		} else if e.Member != "" {
 			// Set element: SADD if present, SREM if tombstoned. The apply path
 			// expects the null-separated "key\x00member" encoding.

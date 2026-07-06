@@ -29,6 +29,9 @@ type SyncEntry struct {
 	// Counter marks a PN-counter key: Value holds the encoded counter state,
 	// reconciled by max-merge instead of the LWW stamp.
 	Counter bool `json:"counter,omitempty"`
+	// Hash marks a hash field entry: Member is the field, Value its value
+	// (empty when Deleted), reconciled by the per-field LWW stamp.
+	Hash bool `json:"hash,omitempty"`
 }
 
 // SyncRequest asks a peer for the LWW digest of one shard.

@@ -73,6 +73,7 @@ func (h *StoreReplicationHandler) LocalDigest(shardIdx int) []cluster.SyncEntry 
 			HLCLogical:  e.Logical,
 			HLCOrigin:   e.Origin,
 			Deleted:     e.Deleted,
+			Hash:        e.Hash,
 		}
 		if e.Counter != nil {
 			// Carry the counter state as the encoded value; peers max-merge it.

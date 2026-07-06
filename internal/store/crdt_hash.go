@@ -113,6 +113,35 @@ func (hv *HashValue) DelFieldWithStamp(field string, st hlcStamp) bool {
 	return was && !is
 }
 
+// appendLWWDigest appends this hash's per-field LWW state to out as digest
+// entries under key: each present field with its value and add stamp, each
+// tombstoned field with its remove stamp (Deleted=true). A hash without a CRDT
+// (only ever touched by the plain path) reports its fields at the zero stamp.
+func (hv *HashValue) appendLWWDigest(key string, out []LWWShardEntry) []LWWShardEntry {
+	hv.mu.RLock()
+	defer hv.mu.RUnlock()
+
+	if hv.crdt == nil {
+		for f, val := range hv.Fields {
+			out = append(out, LWWShardEntry{Key: key, Hash: true, Member: f, Value: val})
+		}
+		return out
+	}
+
+	for f, hf := range hv.crdt.fields {
+		e := LWWShardEntry{
+			Key: key, Hash: true, Member: f,
+			Physical: hf.stamp.TS.Physical, Logical: hf.stamp.TS.Logical, Origin: hf.stamp.Origin,
+			Deleted: hf.deleted,
+		}
+		if !hf.deleted {
+			e.Value = hf.value
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // --- Store-level last-write-wins hash operations ---
 
 // HSetLWW is the convergent entry point for HSET/HMSET, used by the cluster path

@@ -237,6 +237,9 @@ type LWWShardEntry struct {
 	// Counter, when non-nil, means this entry is a PN-counter key: its state is
 	// reconciled by max-merge rather than by the LWW stamp.
 	Counter *CounterState
+	// Hash marks a hash field entry: Member is the field, Value its value
+	// (empty when Deleted), reconciled by the per-field LWW stamp.
+	Hash bool
 }
 
 // ShardCount returns the number of shards, so callers can iterate them.
@@ -278,6 +281,10 @@ func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
 		case ValueTypeSet:
 			if v.SetVal != nil {
 				entries = v.SetVal.appendLWWDigest(k, entries)
+			}
+		case ValueTypeHash:
+			if v.HashVal != nil {
+				entries = v.HashVal.appendLWWDigest(k, entries)
 			}
 		}
 	}
