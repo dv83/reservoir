@@ -522,6 +522,7 @@ type StoredValue struct {
 	LastWrite  time.Time  `json:"last_write"`
 	LastRead   time.Time  `json:"last_read"`
 	memorySize int64      // cached memory size
+	hlc        hlcStamp   // hybrid logical clock of the last write (for LWW conflict resolution)
 
 	// Replication tracking fields (simplified implementation)
 	Replicated          bool      `json:"replicated,omitempty"`
