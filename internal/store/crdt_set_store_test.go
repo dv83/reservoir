@@ -174,6 +174,39 @@ func TestCRDTSetTombstoneGC(t *testing.T) {
 	}
 }
 
+// TestCRDTSetPersistedToCommitLog verifies SAddLWW/SRemLWW append SADD/SREM
+// records with the null-separated "key\x00member..." payload the recovery path
+// decodes, so CRDT set writes survive a restart.
+func TestCRDTSetPersistedToCommitLog(t *testing.T) {
+	s := newCRDTTestStore()
+	defer s.Stop()
+	fake := &fakeCommitLog{}
+	s.SetCommitLog(fake)
+
+	if _, err := s.SAddLWW("k", 100, 0, 1, "a", "b"); err != nil {
+		t.Fatalf("SAddLWW: %v", err)
+	}
+	if _, err := s.SRemLWW("k", 200, 0, 1, "a"); err != nil {
+		t.Fatalf("SRemLWW: %v", err)
+	}
+
+	var addVal, remVal string
+	for _, w := range fake.writes {
+		switch {
+		case w.op == "SADD" && w.key == "k":
+			addVal = w.value
+		case w.op == "SREM" && w.key == "k":
+			remVal = w.value
+		}
+	}
+	if addVal != "k\x00a\x00b" {
+		t.Fatalf("SADD payload = %q, want %q", addVal, "k\x00a\x00b")
+	}
+	if remVal != "k\x00a" {
+		t.Fatalf("SREM payload = %q, want %q", remVal, "k\x00a")
+	}
+}
+
 // TestCRDTSetRetainsTombstonesWhenEmpty verifies that removing every member
 // keeps the set alive (holding tombstones) so a later stale add still cannot
 // resurrect a removed element — the property a delete-on-empty set would lose.

@@ -79,6 +79,22 @@ func New(cfg *config.Config) (*Server, error) {
 			case "DEL":
 				kvStore.Delete(string(entry.Key))
 				return nil
+			case "SADD":
+				// Set mutations are logged with the null-separated
+				// "key\x00member..." encoding. Replay rebuilds membership; the
+				// CRDT element stamps are re-established by the next live write or
+				// by anti-entropy, so plain SAdd/SRem is sufficient here.
+				if members := membersFromReplData(entry.Value); len(members) > 0 {
+					_, err := kvStore.SAdd(string(entry.Key), members...)
+					return err
+				}
+				return nil
+			case "SREM":
+				if members := membersFromReplData(entry.Value); len(members) > 0 {
+					_, err := kvStore.SRem(string(entry.Key), members...)
+					return err
+				}
+				return nil
 			case "INCR", "INCRBY", "DECR", "DECRBY":
 				// Value contains the final result after increment/decrement
 				return kvStore.Set(string(entry.Key), string(entry.Value))
