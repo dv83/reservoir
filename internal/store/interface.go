@@ -35,6 +35,11 @@ type KVStore interface {
 	IncrBy(key string, increment int64) (int64, error)
 	DecrBy(key string, decrement int64) (int64, error)
 
+	// Counter CRDT (multi-master convergent increments)
+	SetLocalOrigin(origin uint64)
+	CounterState(key string) (CounterState, bool)
+	MergeCounter(key string, st CounterState) (int64, error)
+
 	// String operations
 	Append(key, value string) (int64, error)
 	StrLen(key string) (int64, error)

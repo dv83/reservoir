@@ -84,7 +84,15 @@ type LockFreeStore struct {
 	commitLog         interface{}        // 8 bytes - commit log (interface to avoid import cycle)
 	commitLogDir      string             // 8 bytes - commit log directory path
 	recoveryActive    uint32             // 4 bytes - atomic flag for recovery mode
-	_                 [32]byte           // padding до cache line boundary
+	localOrigin       uint64             // 8 bytes - atomic; this node's id for the counter CRDT (0 = non-cluster, plain INCR)
+	_                 [24]byte           // padding до cache line boundary
+}
+
+// SetLocalOrigin records this node's origin id so INCR/DECR maintain the PN
+// counter CRDT for convergent multi-master increments. A zero origin (the
+// default) keeps the plain, non-CRDT increment path for single-node use.
+func (s *LockFreeStore) SetLocalOrigin(origin uint64) {
+	atomic.StoreUint64(&s.localOrigin, origin)
 }
 
 // NewLockFreeStore створює нову lock-free версію store

@@ -541,6 +541,7 @@ type StoredValue struct {
 	LastRead   time.Time  `json:"last_read"`
 	memorySize int64      // cached memory size
 	hlc        hlcStamp   // hybrid logical clock of the last write (for LWW conflict resolution)
+	counter    *pnCounter // PN-counter CRDT state when this string key is used as a counter (cluster mode); nil otherwise
 
 	// Replication tracking fields (simplified implementation)
 	Replicated          bool      `json:"replicated,omitempty"`
@@ -885,6 +886,9 @@ func (sv *StoredValue) MemoryUsage() int64 {
 	switch sv.Type {
 	case ValueTypeString:
 		size += int64(len(sv.StringVal))
+		if sv.counter != nil {
+			size += sv.counter.memoryEstimate()
+		}
 	case ValueTypeList:
 		if sv.ListVal != nil {
 			size += sv.ListVal.MemoryUsage()

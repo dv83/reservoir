@@ -267,6 +267,24 @@ func (s *LockFreeStore) IncrBy(key string, increment int64) (int64, error) {
 	storedValue, exists := shard.data[key]
 	var currentValue int64
 
+	// Cluster mode: maintain a PN-counter CRDT so concurrent increments on
+	// different nodes converge without losing any (see crdt_counter.go). The
+	// plain path below is kept for single-node use (localOrigin == 0).
+	if origin := atomic.LoadUint64(&s.localOrigin); origin != 0 {
+		ctr, err := counterFor(storedValue, exists)
+		if err != nil {
+			return 0, err
+		}
+		current := ctr.value()
+		newValue := current + increment
+		if (increment > 0 && newValue < current) || (increment < 0 && newValue > current) {
+			return 0, pkgErrors.ErrIncrDecrOverflow
+		}
+		ctr.add(origin, increment)
+		s.storeCounter(shard, key, ctr, exists, storedValue)
+		return newValue, nil
+	}
+
 	if exists && storedValue != nil {
 		// Check if the key holds the wrong type
 		if !storedValue.IsString() {
