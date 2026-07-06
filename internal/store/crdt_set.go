@@ -170,6 +170,35 @@ func (sv *SetValue) appendLWWDigest(setKey string, out []LWWShardEntry) []LWWSha
 	return out
 }
 
+// gcElementTombstones drops remove tombstones whose stamp predates cutoffNanos,
+// along with the matching (older, superseded) add, so a forgotten element cannot
+// half-resurrect. Live members (add wins) are always kept. It returns how many
+// tombstones were pruned and whether the set is now fully empty — no members and
+// no stamps — so the caller can reclaim the key. The caller must hold the shard
+// lock; this takes sv.mu.
+func (sv *SetValue) gcElementTombstones(cutoffNanos int64) (pruned int, empty bool) {
+	sv.mu.Lock()
+	defer sv.mu.Unlock()
+
+	if sv.crdt == nil {
+		return 0, len(sv.Elements) == 0
+	}
+
+	for elem, rst := range sv.crdt.removes {
+		if sv.crdt.contains(elem) {
+			continue // add wins; element is live
+		}
+		if rst.TS.Physical < cutoffNanos {
+			delete(sv.crdt.removes, elem)
+			delete(sv.crdt.adds, elem)
+			pruned++
+		}
+	}
+
+	empty = len(sv.Elements) == 0 && len(sv.crdt.adds) == 0 && len(sv.crdt.removes) == 0
+	return pruned, empty
+}
+
 // --- Store-level last-write-wins set operations ---
 
 // SAddLWW is the convergent entry point for SADD, used by the cluster path

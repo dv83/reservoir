@@ -168,9 +168,13 @@ func (s *LockFreeStore) DeleteLWW(key string, physical int64, logical uint32, or
 
 // gcTombstones removes tombstones older than the retention window. Tombstones
 // only need to outlive the delivery of any concurrent older write; a generous
-// window bounds memory without risking resurrection under normal delivery.
+// window bounds memory without risking resurrection under normal delivery. It
+// prunes both string-key tombstones and set element tombstones, and reclaims a
+// CRDT set once all its element tombstones have aged out (so an emptied set
+// eventually disappears from the keyspace).
 func (s *LockFreeStore) gcTombstones(retain time.Duration) int {
 	cutoff := time.Now().Add(-retain)
+	cutoffNanos := cutoff.UnixNano()
 	removed := 0
 	for i := 0; i < numShards; i++ {
 		shard := s.shards[i]
@@ -179,6 +183,27 @@ func (s *LockFreeStore) gcTombstones(retain time.Duration) int {
 			if t.deleted.Before(cutoff) {
 				delete(shard.tombstones, k)
 				removed++
+			}
+		}
+		for k, v := range shard.data {
+			if v == nil || v.Type != ValueTypeSet || v.SetVal == nil {
+				continue
+			}
+			pruned, empty := v.SetVal.gcElementTombstones(cutoffNanos)
+			if empty {
+				freed := v.MemoryUsage()
+				delete(shard.data, k)
+				atomic.AddInt64(&shard.keyCount, -1)
+				atomic.AddInt64(&s.totalKeys, -1)
+				atomic.AddInt64(&shard.memoryUsage, -freed)
+				atomic.AddInt64(&s.totalMemory, -freed)
+				removed++
+			} else if pruned > 0 {
+				old := v.memorySize
+				v.memorySize = 0
+				delta := v.MemoryUsage() - old
+				atomic.AddInt64(&shard.memoryUsage, delta)
+				atomic.AddInt64(&s.totalMemory, delta)
 			}
 		}
 		shard.mu.Unlock()

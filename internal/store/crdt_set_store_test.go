@@ -3,6 +3,7 @@ package store
 import (
 	"sort"
 	"testing"
+	"time"
 )
 
 func newCRDTTestStore() *LockFreeStore {
@@ -132,6 +133,44 @@ func TestCRDTSetConvergence(t *testing.T) {
 		if !eqStrings(got, want) {
 			t.Fatalf("shift %d diverged: got %v, want %v", shift, got, want)
 		}
+	}
+}
+
+// TestCRDTSetTombstoneGC verifies that once a set's element tombstones age out,
+// the GC pass prunes them and reclaims the now-empty set, while a still-fresh
+// tombstone (and any live member) is preserved.
+func TestCRDTSetTombstoneGC(t *testing.T) {
+	s := newCRDTTestStore()
+	defer s.Stop()
+
+	past := time.Now().Add(-2 * time.Hour).UnixNano()
+	now := time.Now().UnixNano()
+
+	// "old" set: a member added and removed long ago — fully tombstoned.
+	s.SAddLWW("old", past, 0, 1, "a")
+	s.SRemLWW("old", past+1, 0, 1, "a")
+
+	// "mixed" set: a live member plus a member removed just now (fresh tombstone).
+	s.SAddLWW("mixed", now, 0, 1, "live")
+	s.SAddLWW("mixed", past, 0, 1, "gone")
+	s.SRemLWW("mixed", now, 0, 1, "gone")
+
+	// Retain one hour: the past tombstones are stale, the "now" one is fresh.
+	s.gcTombstones(time.Hour)
+
+	// "old" aged out entirely and should be reclaimed from the keyspace.
+	if _, ok := s.GetStoredValue("old"); ok {
+		t.Error("fully-aged-out empty set 'old' was not reclaimed")
+	}
+	// A stale re-add after GC is allowed to recreate the element (tombstone gone).
+	// This is the accepted GC tradeoff; assert the set is live and holds it.
+	if m, _ := s.SIsMember("mixed", "live"); !m {
+		t.Error("live member pruned by GC")
+	}
+	// "mixed" still holds a fresh tombstone for "gone": a stale re-add must fail.
+	s.SAddLWW("mixed", past+5, 0, 1, "gone")
+	if m, _ := s.SIsMember("mixed", "gone"); m {
+		t.Error("fresh tombstone for 'gone' was incorrectly GC'd (stale add resurrected it)")
 	}
 }
 
