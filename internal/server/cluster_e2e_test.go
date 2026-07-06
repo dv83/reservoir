@@ -206,4 +206,19 @@ func TestClusterEndToEndConvergence(t *testing.T) {
 			t.Fatalf("list order diverged: node0=%v node%d=%v", l0, i+1, li)
 		}
 	}
+
+	// Anti-entropy observability: within a few background rounds the counters
+	// must climb — nodes both initiate digest requests and serve them.
+	aeActive := eventually(8*time.Second, func() bool {
+		var rounds, served uint64
+		for _, n := range nodes {
+			ae := n.cm.GetAntiEntropyStats()
+			rounds += ae.RoundsInitiated
+			served += ae.DigestsServed
+		}
+		return rounds > 0 && served > 0
+	})
+	if !aeActive {
+		t.Error("anti-entropy counters did not advance across the cluster")
+	}
 }

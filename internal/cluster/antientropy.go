@@ -43,6 +43,8 @@ func (cm *ClusterManager) antiEntropyLoop() {
 			req := SyncRequest{NodeID: cm.localNode.NodeID, ShardIdx: shardIdx % n}
 			if err := cm.transport.Send(peer, MsgSyncRequest, req); err != nil {
 				logger.Debug("anti-entropy: failed to request digest from %s: %v", peer, err)
+			} else {
+				cm.aeRounds.Add(1)
 			}
 			shardIdx = (shardIdx + 1) % n
 		}
@@ -81,6 +83,7 @@ func (cm *ClusterManager) handleSyncRequest(msg *Message) error {
 		ShardIdx: req.ShardIdx,
 		Entries:  cm.replicationHandler.LocalDigest(req.ShardIdx),
 	}
+	cm.aeDigestsServed.Add(1)
 	return cm.transport.Send(req.NodeID, MsgSyncResponse, resp)
 }
 
@@ -141,6 +144,7 @@ func (cm *ClusterManager) handleSyncResponse(msg *Message) error {
 			logger.Debug("anti-entropy: apply failed for key %s: %v", e.Key, err)
 		}
 	}
+	cm.aeEntriesApplied.Add(uint64(len(resp.Entries)))
 	logger.Debug("anti-entropy: reconciled shard %d with %d entries from %s",
 		resp.ShardIdx, len(resp.Entries), resp.NodeID)
 	return nil

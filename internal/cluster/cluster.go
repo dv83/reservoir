@@ -81,6 +81,11 @@ type ClusterManager struct {
 	retryQueue        chan *FailedReplicationEvent
 	droppedEventCount atomic.Uint64
 
+	// Anti-entropy observability counters.
+	aeRounds         atomic.Uint64 // digest requests this node initiated
+	aeDigestsServed  atomic.Uint64 // digest responses this node served to peers
+	aeEntriesApplied atomic.Uint64 // entries reconciled from peer digests
+
 	// Callbacks
 	onBecomeLeader   func()
 	onBecomeFollower func()
@@ -217,7 +222,7 @@ func (cm *ClusterManager) loadState() {
 	if len(st.VotedFor) == 16 {
 		var id UUIDv7
 		copy(id[:], st.VotedFor)
-		cm.localNode.VotedFor.Store(&id)
+		cm.localNode.SetVotedFor(id)
 	}
 	logger.Info("Restored persisted raft state: term=%d", st.CurrentTerm)
 }
@@ -421,7 +426,7 @@ func (cm *ClusterManager) startElection() {
 	currentTerm := cm.localNode.CurrentTerm.Load()
 
 	// Vote for self
-	cm.localNode.VotedFor.Store(&cm.localNode.NodeID)
+	cm.localNode.SetVotedFor(cm.localNode.NodeID)
 	cm.persistState()         // durably record the new term + self-vote before campaigning
 	cm.votesReceived.Store(1) // Self vote
 	cm.electionTerm.Store(currentTerm)
@@ -853,6 +858,26 @@ func (cm *ClusterManager) GetReplicationStats() ReplicationStats {
 		VectorClockDropped:   vectorClockDropped,
 		QueueCapacity:        cap(cm.replicationQueue),
 		RetryQueueCapacity:   cap(cm.retryQueue),
+	}
+}
+
+// AntiEntropyStats reports background reconciliation activity: how many digest
+// rounds this node has initiated and served, and how many entries it has
+// reconciled from peers. A healthy cluster shows rounds and served climbing
+// steadily; entries-applied climbing while live replication is idle indicates
+// divergence that anti-entropy is repairing.
+type AntiEntropyStats struct {
+	RoundsInitiated uint64 `json:"rounds_initiated"`
+	DigestsServed   uint64 `json:"digests_served"`
+	EntriesApplied  uint64 `json:"entries_applied"`
+}
+
+// GetAntiEntropyStats returns the node's anti-entropy activity counters.
+func (cm *ClusterManager) GetAntiEntropyStats() AntiEntropyStats {
+	return AntiEntropyStats{
+		RoundsInitiated: cm.aeRounds.Load(),
+		DigestsServed:   cm.aeDigestsServed.Load(),
+		EntriesApplied:  cm.aeEntriesApplied.Load(),
 	}
 }
 

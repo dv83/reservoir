@@ -96,6 +96,31 @@ func StartUIServer(addr string, kvStore store.KVStore, clusterManager *cluster.C
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	// API Endpoint for CRDT observability: local CRDT state and tombstone
+	// gauges, plus this node's anti-entropy activity when clustered.
+	mux.HandleFunc("/api/crdt", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		type CRDTResponse struct {
+			Store       store.CRDTStats           `json:"store"`
+			AntiEntropy *cluster.AntiEntropyStats `json:"anti_entropy,omitempty"`
+			Replication *cluster.ReplicationStats `json:"replication,omitempty"`
+		}
+		resp := CRDTResponse{Store: kvStore.CRDTStats()}
+		if clusterManager != nil {
+			ae := clusterManager.GetAntiEntropyStats()
+			rs := clusterManager.GetReplicationStats()
+			resp.AntiEntropy = &ae
+			resp.Replication = &rs
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			logger.Error("Failed to encode CRDT stats: %v", err)
+		}
+	})
+
 	// Serve Static Files (embedded HTML)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {

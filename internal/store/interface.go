@@ -117,6 +117,9 @@ type KVStore interface {
 	// Async metrics
 	ForceFlushMetrics()
 
+	// CRDT observability
+	CRDTStats() CRDTStats
+
 	// Commit Log management
 	GetCommitLogDir() string
 	GetCommitLogStats() map[string]interface{}

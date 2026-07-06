@@ -81,9 +81,14 @@ func (s *LockFreeStore) ensureListRGA(list *ListValue) *rgaList {
 }
 
 // rematerialize rebuilds the deque read view from the RGA visible order and
-// records the changed descriptors for replication.
+// records the changed descriptors for replication. The deque pointer is swapped
+// under lv.mu because readers (LRange/LIndex/LLen) access it under lv.mu after
+// releasing the shard lock, so the swap must exclude them.
 func (list *ListValue) rematerialize(changed []rgaElem) {
-	list.deque = NewDequeWithElements(list.rga.values())
+	newDeque := NewDequeWithElements(list.rga.values())
+	list.mu.Lock()
+	list.deque = newDeque
+	list.mu.Unlock()
 	for _, e := range changed {
 		list.pending = append(list.pending, descFromElem(e))
 	}
@@ -495,8 +500,13 @@ func (s *LockFreeStore) ApplyListDelta(key string, delta ListDelta) error {
 			r.applyInsert(d.elem())
 		}
 	}
-	// Rebuild the read view without re-queuing anything for replication.
-	list.deque = NewDequeWithElements(r.values())
+	// Rebuild the read view without re-queuing anything for replication. Swap
+	// under lv.mu so concurrent readers (which hold only lv.mu) never observe a
+	// torn pointer.
+	newDeque := NewDequeWithElements(r.values())
+	list.mu.Lock()
+	list.deque = newDeque
+	list.mu.Unlock()
 
 	if r.length() == 0 && len(r.elems) == 0 {
 		if existed {

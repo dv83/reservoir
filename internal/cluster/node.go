@@ -37,7 +37,7 @@ type Node struct {
 
 	// Leadership (inspired by Raft)
 	CurrentTerm atomic.Uint64
-	VotedFor    atomic.Value // *UUIDv7
+	VotedFor    atomic.Value // *UUIDv7 (may wrap a nil pointer meaning "no vote")
 	LeaderID    atomic.Value // *UUIDv7
 
 	// Replication state (optimized lock-free vector clock)
@@ -52,6 +52,28 @@ type Node struct {
 	MessagesSent     atomic.Uint64
 	BytesReceived    atomic.Uint64
 	BytesSent        atomic.Uint64
+}
+
+// SetVotedFor records a vote for the given candidate.
+func (n *Node) SetVotedFor(id UUIDv7) {
+	n.VotedFor.Store(&id)
+}
+
+// ClearVotedFor resets the vote. It stores a typed nil pointer rather than an
+// untyped nil (atomic.Value panics on a nil interface store).
+func (n *Node) ClearVotedFor() {
+	n.VotedFor.Store((*UUIDv7)(nil))
+}
+
+// VotedForID returns the candidate this node voted for, or nil if it has not
+// voted (never set, or cleared).
+func (n *Node) VotedForID() *UUIDv7 {
+	v := n.VotedFor.Load()
+	if v == nil {
+		return nil
+	}
+	id, _ := v.(*UUIDv7)
+	return id
 }
 
 // NewNode creates a new cluster node with a fresh ID

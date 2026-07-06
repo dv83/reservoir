@@ -45,7 +45,7 @@ func (cm *ClusterManager) handleHeartbeat(msg *Message) error {
 	if hb.Term > currentTerm {
 		cm.localNode.CurrentTerm.Store(hb.Term)
 		cm.localNode.SetState(StateFollower)
-		cm.localNode.VotedFor.Store(nil)
+		cm.localNode.ClearVotedFor()
 		cm.persistState()
 		cm.resetElectionTimer()
 		currentTerm = hb.Term
@@ -246,15 +246,16 @@ func (cm *ClusterManager) handleVoteRequest(msg *Message) error {
 		if req.Term > currentTerm {
 			cm.localNode.CurrentTerm.Store(req.Term)
 			cm.localNode.SetState(StateFollower)
-			cm.localNode.VotedFor.Store(nil)
+			cm.localNode.ClearVotedFor()
 			currentTerm = req.Term
 		}
 
-		// Check if we can vote
-		votedFor := cm.localNode.VotedFor.Load()
-		if votedFor == nil || *votedFor.(*UUIDv7) == req.CandidateID {
+		// Check if we can vote (no prior vote this term, or already voted for this
+		// same candidate). VotedForID safely handles a cleared/typed-nil vote.
+		votedFor := cm.localNode.VotedForID()
+		if votedFor == nil || *votedFor == req.CandidateID {
 			// Grant vote
-			cm.localNode.VotedFor.Store(&req.CandidateID)
+			cm.localNode.SetVotedFor(req.CandidateID)
 			voteGranted = true
 			cm.resetElectionTimer()
 			logger.Info("Granted vote to %s for term %d", req.CandidateID, req.Term)
@@ -296,7 +297,7 @@ func (cm *ClusterManager) handleVoteResponse(msg *Message) error {
 	if resp.Term > cm.localNode.CurrentTerm.Load() {
 		cm.localNode.CurrentTerm.Store(resp.Term)
 		cm.localNode.SetState(StateFollower)
-		cm.localNode.VotedFor.Store(nil)
+		cm.localNode.ClearVotedFor()
 		cm.persistState()
 		return nil
 	}
