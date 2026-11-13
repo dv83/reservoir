@@ -116,98 +116,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 	parser := protocol.NewZeroCopyParser()
 	defer parser.Release() // Return buffer to pool when done
 
-	// Pre-create replication callback once per connection (optimization).
-	// SET is resolved by last-write-wins: it is stamped with a single HLC used
-	// for both the local apply and the replicated event, so all replicas
-	// converge. Other operations keep the plain queue-only path (the handler has
-	// already applied them locally).
+	// Replication callback, created once per connection. In cluster mode every
+	// write is routed through replicateWrite (see below).
 	var replicationCallback commands.ReplicationCallback
 	if s.clusterManager != nil {
-		replicationCallback = func(operation, key string, value []byte) {
-			switch operation {
-			case "SET":
-				p, l, o := s.clusterManager.NextStamp()
-				_, _ = s.kvStore.SetLWW(key, string(value), p, l, o)
-				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
-			case "DEL":
-				p, l, o := s.clusterManager.NextStamp()
-				s.kvStore.DeleteLWW(key, p, l, o)
-				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
-			case "SADD":
-				// Element-level CRDT: stamp each member so concurrent add/remove
-				// across nodes converges. The handler already applied the plain
-				// add (for the reply count); this records the element stamps.
-				p, l, o := s.clusterManager.NextStamp()
-				if members := membersFromReplData(value); len(members) > 0 {
-					_, _ = s.kvStore.SAddLWW(key, p, l, o, members...)
-				}
-				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
-			case "SREM":
-				p, l, o := s.clusterManager.NextStamp()
-				if members := membersFromReplData(value); len(members) > 0 {
-					_, _ = s.kvStore.SRemLWW(key, p, l, o, members...)
-				}
-				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
-			case "SPOP":
-				// SPOP removes a specific element; value is that element. Record a
-				// stamped tombstone so the removal converges like an SREM.
-				p, l, o := s.clusterManager.NextStamp()
-				_, _ = s.kvStore.SRemLWW(key, p, l, o, string(value))
-				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
-			case "INCR", "DECR", "INCRBY", "DECRBY":
-				// IncrBy already applied the increment into the key's PN-counter.
-				// Replicate the whole counter state so peers converge by max-merge
-				// (never losing a concurrent increment), instead of the old
-				// result-based path that overwrote and lost updates.
-				if st, ok := s.kvStore.CounterState(key); ok {
-					if enc, err := encodeCounterState(st); err == nil {
-						s.clusterManager.QueueReplication("COUNTER", key, enc)
-					} else {
-						logger.Error("failed to encode counter state for %s: %v", key, err)
-					}
-				}
-			case "HSET", "HMSET":
-				// Per-field CRDT: stamp each field so concurrent field writes
-				// across nodes converge. The handler already applied the plain
-				// write (for the reply count); this records the field stamps.
-				p, l, o := s.clusterManager.NextStamp()
-				if fv := membersFromReplData(value); len(fv) >= 2 {
-					_, _ = s.kvStore.HSetLWW(key, p, l, o, fv...)
-				}
-				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
-			case "HDEL":
-				p, l, o := s.clusterManager.NextStamp()
-				if fields := membersFromReplData(value); len(fields) > 0 {
-					_, _ = s.kvStore.HDelLWW(key, p, l, o, fields...)
-				}
-				s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
-			case "HINCRBY", "HINCRBYFLOAT":
-				// value is "key\x00field\x00increment\x00result". Converge the
-				// field's resulting value under per-field LWW (concurrent
-				// increments on the same field are last-write-wins, not summed),
-				// keeping the CRDT and materialized fields consistent.
-				if field, result, ok := hincrResult(value); ok {
-					p, l, o := s.clusterManager.NextStamp()
-					_, _ = s.kvStore.HSetLWW(key, p, l, o, field, result)
-					s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
-				}
-			case "LPUSH", "RPUSH", "LPUSHX", "RPUSHX", "LPUSHUNIQUE", "RPUSHUNIQUE",
-				"LPOP", "RPOP", "LSET", "LREM", "LTRIM":
-				// The list op already applied to the key's RGA, minting element
-				// ids and/or tombstones. Replicate the resulting descriptors so
-				// peers converge on the same sequence (ids cannot be re-derived
-				// from values, so the raw values path would not converge).
-				if d, ok := s.kvStore.DrainListDelta(key); ok {
-					if enc, err := encodeListDelta(d); err == nil {
-						s.clusterManager.QueueReplication("LDELTA", key, enc)
-					} else {
-						logger.Error("failed to encode list delta for %s: %v", key, err)
-					}
-				}
-			default:
-				s.clusterManager.QueueReplication(operation, key, value)
-			}
-		}
+		replicationCallback = s.replicateWrite
 	}
 
 	for {
@@ -281,5 +194,103 @@ func (s *Server) handleConnection(conn net.Conn) {
 			}
 			return // Connection broken
 		}
+	}
+}
+
+// replicateWrite is the cluster-mode replication callback: it applies the
+// convergent (CRDT/LWW) form of a write locally where needed and queues the
+// replication event. SET is resolved by last-write-wins, stamped with a single
+// HLC used for both the local apply and the replicated event, so all replicas
+// converge. It is a method (not a per-connection closure) so other write
+// sources — e.g. deferred commands — replicate through exactly the same path.
+func (s *Server) replicateWrite(operation, key string, value []byte) {
+	switch operation {
+	case "SET":
+		p, l, o := s.clusterManager.NextStamp()
+		_, _ = s.kvStore.SetLWW(key, string(value), p, l, o)
+		s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+	case "DEL":
+		p, l, o := s.clusterManager.NextStamp()
+		s.kvStore.DeleteLWW(key, p, l, o)
+		s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+	case "SADD":
+		// Element-level CRDT: stamp each member so concurrent add/remove
+		// across nodes converges. The handler already applied the plain
+		// add (for the reply count); this records the element stamps.
+		p, l, o := s.clusterManager.NextStamp()
+		if members := membersFromReplData(value); len(members) > 0 {
+			_, _ = s.kvStore.SAddLWW(key, p, l, o, members...)
+		}
+		s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+	case "SREM":
+		p, l, o := s.clusterManager.NextStamp()
+		if members := membersFromReplData(value); len(members) > 0 {
+			_, _ = s.kvStore.SRemLWW(key, p, l, o, members...)
+		}
+		s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+	case "SPOP":
+		// SPOP removes a specific element; value is that element. Record a
+		// stamped tombstone so the removal converges like an SREM.
+		p, l, o := s.clusterManager.NextStamp()
+		_, _ = s.kvStore.SRemLWW(key, p, l, o, string(value))
+		s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+	case "INCR", "DECR", "INCRBY", "DECRBY":
+		// IncrBy already applied the increment into the key's PN-counter.
+		// Replicate the whole counter state so peers converge by max-merge
+		// (never losing a concurrent increment), instead of the old
+		// result-based path that overwrote and lost updates.
+		if st, ok := s.kvStore.CounterState(key); ok {
+			if enc, err := encodeCounterState(st); err == nil {
+				s.clusterManager.QueueReplication("COUNTER", key, enc)
+			} else {
+				logger.Error("failed to encode counter state for %s: %v", key, err)
+			}
+		}
+	case "HSET", "HMSET":
+		// Per-field CRDT: stamp each field so concurrent field writes
+		// across nodes converge. The handler already applied the plain
+		// write (for the reply count); this records the field stamps.
+		p, l, o := s.clusterManager.NextStamp()
+		if fv := membersFromReplData(value); len(fv) >= 2 {
+			_, _ = s.kvStore.HSetLWW(key, p, l, o, fv...)
+		}
+		s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+	case "HDEL":
+		p, l, o := s.clusterManager.NextStamp()
+		if fields := membersFromReplData(value); len(fields) > 0 {
+			_, _ = s.kvStore.HDelLWW(key, p, l, o, fields...)
+		}
+		s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+	case "HINCRBY", "HINCRBYFLOAT":
+		// value is "key\x00field\x00increment\x00result". Converge the
+		// field's resulting value under per-field LWW (concurrent
+		// increments on the same field are last-write-wins, not summed),
+		// keeping the CRDT and materialized fields consistent.
+		if field, result, ok := hincrResult(value); ok {
+			p, l, o := s.clusterManager.NextStamp()
+			_, _ = s.kvStore.HSetLWW(key, p, l, o, field, result)
+			s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+		}
+	case "LPUSH", "RPUSH", "LPUSHX", "RPUSHX", "LPUSHUNIQUE", "RPUSHUNIQUE",
+		"LPOP", "RPOP", "LSET", "LREM", "LTRIM":
+		// The list op already applied to the key's RGA, minting element
+		// ids and/or tombstones. Replicate the resulting descriptors so
+		// peers converge on the same sequence (ids cannot be re-derived
+		// from values, so the raw values path would not converge).
+		if d, ok := s.kvStore.DrainListDelta(key); ok {
+			if enc, err := encodeListDelta(d); err == nil {
+				s.clusterManager.QueueReplication("LDELTA", key, enc)
+			} else {
+				logger.Error("failed to encode list delta for %s: %v", key, err)
+			}
+		}
+	case "DEFER", "DEFER.CANCEL":
+		// Deferred commands are owned by the node that accepted them: only that
+		// node executes them, and executeDeferred replicates the effect through
+		// this same path. Replicating the schedule made every node execute it —
+		// e.g. a deferred INCR landed once per node in the PN-counter (N× total)
+		// and __rand_int__ templates expanded differently on each node.
+	default:
+		s.clusterManager.QueueReplication(operation, key, value)
 	}
 }

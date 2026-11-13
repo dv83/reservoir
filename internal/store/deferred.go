@@ -6,8 +6,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// DeferredExecutor runs a due deferred command in place of the scheduler's
+// local execution. In cluster mode the server installs one that routes the
+// command through the normal replicated write path, so a deferred command is
+// executed exactly once (on the node that accepted it) and its effect replicates
+// like any client write. key and args arrive with templates already expanded.
+type DeferredExecutor func(cmdType, key string, args []string)
 
 // DeferredCommand represents a command that will be executed at a future time
 type DeferredCommand struct {
@@ -27,6 +35,23 @@ type DeferredScheduler struct {
 	store     *LockFreeStore               // Reference to the store for command execution
 	stopCh    chan struct{}                // Channel to stop the scheduler
 	running   bool                         // Whether the scheduler is running
+	executor  atomic.Pointer[DeferredExecutor]
+}
+
+// SetExecutor installs (or, with nil, removes) the hook that executes due
+// commands instead of the scheduler's local switch.
+func (ds *DeferredScheduler) SetExecutor(fn DeferredExecutor) {
+	if fn == nil {
+		ds.executor.Store(nil)
+		return
+	}
+	ds.executor.Store(&fn)
+}
+
+// SetDeferredExecutor installs the deferred-command execution hook (see
+// DeferredExecutor). Used by the server in cluster mode.
+func (s *LockFreeStore) SetDeferredExecutor(fn DeferredExecutor) {
+	s.deferredScheduler.SetExecutor(fn)
 }
 
 // NewDeferredScheduler creates a new deferred command scheduler
@@ -197,44 +222,49 @@ func (ds *DeferredScheduler) executeReadyCommands(now time.Time) {
 
 // executeCommand executes a single deferred command
 func (ds *DeferredScheduler) executeCommand(cmd *DeferredCommand) {
-	switch cmd.CommandType {
+	// Expand templates exactly once, so a hook that replicates the command ships
+	// concrete values and every replica sees the same ones.
+	key := expandTemplatesIfNeeded(cmd.Key)
+	args := make([]string, len(cmd.Args))
+	for i, a := range cmd.Args {
+		args[i] = expandTemplatesIfNeeded(a)
+	}
+
+	if p := ds.executor.Load(); p != nil {
+		(*p)(cmd.CommandType, key, args)
+		return
+	}
+	ds.executeLocal(cmd.CommandType, key, args)
+}
+
+// executeLocal applies a due command directly to the store (single-node mode).
+func (ds *DeferredScheduler) executeLocal(cmdType, key string, args []string) {
+	switch cmdType {
 	case "SET":
-		if len(cmd.Args) >= 1 {
-			// Process template expansion for deferred commands
-			key := expandTemplatesIfNeeded(cmd.Key)
-			value := expandTemplatesIfNeeded(cmd.Args[0])
-			ds.store.Set(key, value)
+		if len(args) >= 1 {
+			ds.store.Set(key, args[0])
 		}
 	case "DEL":
-		key := expandTemplatesIfNeeded(cmd.Key)
 		ds.store.Delete(key)
 	case "INCR":
-		key := expandTemplatesIfNeeded(cmd.Key)
 		ds.store.Incr(key)
 	case "DECR":
-		key := expandTemplatesIfNeeded(cmd.Key)
 		ds.store.Decr(key)
 	case "INCRBY":
-		if len(cmd.Args) >= 1 {
-			key := expandTemplatesIfNeeded(cmd.Key)
-			value := expandTemplatesIfNeeded(cmd.Args[0])
-			if increment := parseInt64Fast(value); increment != 0 {
+		if len(args) >= 1 {
+			if increment := parseInt64Fast(args[0]); increment != 0 {
 				ds.store.IncrBy(key, increment)
 			}
 		}
 	case "DECRBY":
-		if len(cmd.Args) >= 1 {
-			key := expandTemplatesIfNeeded(cmd.Key)
-			value := expandTemplatesIfNeeded(cmd.Args[0])
-			if decrement := parseInt64Fast(value); decrement != 0 {
+		if len(args) >= 1 {
+			if decrement := parseInt64Fast(args[0]); decrement != 0 {
 				ds.store.DecrBy(key, decrement)
 			}
 		}
 	case "APPEND":
-		if len(cmd.Args) >= 1 {
-			key := expandTemplatesIfNeeded(cmd.Key)
-			value := expandTemplatesIfNeeded(cmd.Args[0])
-			ds.store.Append(key, value)
+		if len(args) >= 1 {
+			ds.store.Append(key, args[0])
 		}
 	}
 }

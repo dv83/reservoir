@@ -222,3 +222,110 @@ func TestClusterEndToEndConvergence(t *testing.T) {
 		t.Error("anti-entropy counters did not advance across the cluster")
 	}
 }
+
+// newE2ECluster starts three joined nodes and waits for the full mesh.
+func newE2ECluster(t *testing.T) []*e2eNode {
+	t.Helper()
+	clusterID := cluster.NewUUIDv7()
+	nodes := []*e2eNode{newE2ENode(t, clusterID), newE2ENode(t, clusterID), newE2ENode(t, clusterID)}
+	t.Cleanup(func() {
+		for _, n := range nodes {
+			n.stop()
+		}
+	})
+	for _, n := range nodes[1:] {
+		if err := n.cm.JoinCluster("127.0.0.1", nodes[0].port); err != nil {
+			t.Fatalf("join: %v", err)
+		}
+	}
+	if !eventually(10*time.Second, func() bool {
+		for _, n := range nodes {
+			if len(n.cm.GetNodes()) != len(nodes) {
+				return false
+			}
+		}
+		return true
+	}) {
+		t.Fatal("cluster mesh did not form")
+	}
+	return nodes
+}
+
+// TestClusterDeferredExecutesOnce is the regression test for deferred commands
+// in cluster mode: a deferred INCR must count once cluster-wide. Previously the
+// schedule was replicated and every node executed it into its own PN-counter
+// slot, so anti-entropy merged them into N× the intended increment.
+func TestClusterDeferredExecutesOnce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cluster e2e test in -short mode")
+	}
+	nodes := newE2ECluster(t)
+
+	// The origin node executes its due command through the server executor.
+	origin := &Server{kvStore: nodes[0].store, clusterManager: nodes[0].cm}
+	origin.executeDeferred("INCR", "dc", nil)
+	origin.executeDeferred("INCRBY", "dc", []string{"4"})
+	origin.executeDeferred("SET", "ds", []string{"once"})
+
+	ok := eventually(10*time.Second, func() bool {
+		for _, n := range nodes {
+			if v, _ := n.store.Get("dc"); v != "5" {
+				return false
+			}
+			if v, _ := n.store.Get("ds"); v != "once" {
+				return false
+			}
+		}
+		return true
+	})
+	if !ok {
+		for i, n := range nodes {
+			dc, _ := n.store.Get("dc")
+			ds, _ := n.store.Get("ds")
+			t.Logf("node %d: dc=%q ds=%q", i, dc, ds)
+		}
+		t.Fatal("deferred effects did not converge to exactly-once values")
+	}
+
+	// Force full anti-entropy between every pair (background anti-entropy only
+	// visits one of 256 shards per 2s, so waiting would not cover this key). The
+	// counter must stay at 5: under the old behavior each node had run the INCR
+	// into its own PN slot, and this merge turned 1 increment into 3.
+	fullReconcile(nodes)
+	for i, n := range nodes {
+		if v, _ := n.store.Get("dc"); v != "5" {
+			t.Fatalf("node %d counter is %q after full reconciliation, want 5", i, v)
+		}
+	}
+}
+
+// fullReconcile pulls every shard's digest between every ordered pair of nodes,
+// as background anti-entropy eventually would.
+func fullReconcile(nodes []*e2eNode) {
+	for _, a := range nodes {
+		for _, b := range nodes {
+			if a != b {
+				reconcile(&StoreReplicationHandler{Store: a.store}, &StoreReplicationHandler{Store: b.store})
+			}
+		}
+	}
+}
+
+// TestApplyReplicationIgnoresDefer verifies a follower does not schedule a
+// replicated DEFER (it would execute once per node).
+func TestApplyReplicationIgnoresDefer(t *testing.T) {
+	st := store.NewStore(&store.Limits{MaxKeySize: 1024, MaxValueSize: 1 << 20, MaxMemoryUsage: 1 << 30})
+	defer st.Stop()
+	h := &StoreReplicationHandler{Store: st}
+
+	if err := h.ApplyReplication(cluster.ReplicationEvent{
+		Operation: "DEFER",
+		Key:       "id-1",
+		Value:     []byte("1:INCR:k"),
+	}); err != nil {
+		t.Fatalf("apply DEFER: %v", err)
+	}
+	if n := len(st.ListDeferredCommands()); n != 0 {
+		t.Fatalf("follower scheduled %d deferred command(s), want 0", n)
+	}
+}

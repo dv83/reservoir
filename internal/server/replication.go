@@ -402,33 +402,13 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 		return h.Store.Set(event.Key, resultStr)
 	case "APPEND":
 		return h.Store.Set(event.Key, string(event.Value))
-	case "DEFER":
-		deferData := string(event.Value)
-		parts := strings.Split(deferData, ":")
-		if len(parts) < 3 {
-			logger.Warning("Invalid DEFER replication data: %s", deferData)
-			return nil
-		}
-		delaySeconds, _ := strconv.Atoi(parts[0])
-		commandType := parts[1]
-		key := parts[2]
-		args := parts[3:]
-		if lockFreeStore, ok := h.Store.(*store.LockFreeStore); ok {
-			cmd := &store.DeferredCommand{
-				ID:          event.Key,
-				ExecuteAt:   time.Now().Add(time.Duration(delaySeconds) * time.Second),
-				CommandType: commandType,
-				Key:         key,
-				Args:        args,
-				CreatedAt:   time.Now(),
-			}
-			lockFreeStore.AddDeferredCommandDirect(cmd)
-		}
-		return nil
-	case "DEFER.CANCEL":
-		if lockFreeStore, ok := h.Store.(*store.LockFreeStore); ok {
-			lockFreeStore.CancelDeferredCommand(event.Key)
-		}
+	case "DEFER", "DEFER.CANCEL":
+		// Deferred commands are owned by the node that accepted them, which
+		// executes them once and replicates the effect as ordinary writes.
+		// Current senders never replicate the schedule; ignore it from older
+		// ones, since scheduling it here would execute it once per node (a
+		// deferred INCR would count N times in the PN-counter).
+		logger.Debug("Ignoring replicated %s for %s: deferred commands run only on their origin node", event.Operation, event.Key)
 		return nil
 	case "EXPIRE":
 		// Value is the absolute expiry time as unix nanoseconds, so replicas

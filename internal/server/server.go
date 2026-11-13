@@ -232,7 +232,7 @@ func New(cfg *config.Config) (*Server, error) {
 		uiServer = StartUIServer(cfg.UIPort, kvStore, clusterManager)
 	}
 
-	return &Server{
+	srv := &Server{
 		cfg:               cfg,
 		kvStore:           kvStore,
 		commandRegistry:   commandRegistry,
@@ -240,7 +240,15 @@ func New(cfg *config.Config) (*Server, error) {
 		clusterManager:    clusterManager,
 		shutdownChan:      make(chan struct{}),
 		uiServer:          uiServer,
-	}, nil
+	}
+
+	// In cluster mode, deferred commands execute only on the node that accepted
+	// them and replicate their effect through the normal write path.
+	if clusterManager != nil {
+		kvStore.SetDeferredExecutor(srv.executeDeferred)
+	}
+
+	return srv, nil
 }
 
 // Start starts the server and blocks until shutdown
