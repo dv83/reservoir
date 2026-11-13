@@ -15,9 +15,22 @@ performance optimizations for both standalone and distributed deployments.
 - **Memory Efficiency**: 16MB arena pools with reduced GC pressure
 - **Protocol Parsing**: 70% reduction in memory allocations
 
+## Specs and changes (OpenSpec)
+
+Behavior is specified with [OpenSpec](https://github.com/Fission-AI/OpenSpec) 2.x under `openspec/`:
+
+- `openspec/specs/<capability>/spec.md` — the source of truth for current behavior (requirements + scenarios).
+- `openspec/changes/<change-id>/` — proposed work: `proposal.md`, `design.md`, `tasks.md` and spec deltas.
+- `openspec/config.yaml` — project rules for every artifact (convergence, tests, English).
+
+Workflow: propose a change before non-trivial work (`/openspec-propose`), implement it task by task
+(`/openspec-apply-change`), then archive it so its deltas merge into the main specs (`/openspec-archive-change`).
+Check artifacts with `openspec validate --all --strict`. Set `OPENSPEC_TELEMETRY=0` to disable the CLI's
+anonymous usage stats. New planned work goes into `openspec/changes/`, not TODO.md.
+
 ## Known Issues
 
-See [TODO.md](TODO.md) for current cluster networking and discovery issues that need to be addressed.
+Open work is tracked as OpenSpec changes (`openspec list`). [TODO.md](TODO.md) holds the older, mostly completed backlog.
 
 ## Development Commands
 

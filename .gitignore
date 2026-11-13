@@ -50,6 +50,8 @@ coverage.out
 coverage.html
 
 # Claude Code and development tools
-.claude/
+# Local Claude Code state stays untracked; project skills (OpenSpec) are shared.
+.claude/*
+!.claude/skills/
 .specify/
 .cluster.info
