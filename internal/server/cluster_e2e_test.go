@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"net"
 	"sort"
@@ -8,6 +10,8 @@ import (
 	"time"
 
 	"reservoir/internal/cluster"
+	"reservoir/internal/commands"
+	"reservoir/internal/protocol"
 	"reservoir/internal/store"
 )
 
@@ -327,5 +331,102 @@ func TestApplyReplicationIgnoresDefer(t *testing.T) {
 	}
 	if n := len(st.ListDeferredCommands()); n != 0 {
 		t.Fatalf("follower scheduled %d deferred command(s), want 0", n)
+	}
+}
+
+// runHandler executes a real command handler on a node, routing replication
+// through the node's real cluster write path.
+func runHandler(t *testing.T, srv *Server, h commands.ZeroCopyHandlerWithReplication, args ...string) {
+	t.Helper()
+	bargs := make([][]byte, len(args))
+	for i, a := range args {
+		bargs[i] = []byte(a)
+	}
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
+	cmd := &protocol.ZeroCopyCommand{Command: []byte("TEST"), Args: bargs}
+	if err := h(srv.kvStore, cmd, w, srv.replicateWrite); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	w.Flush()
+}
+
+// TestClusterSetEXKeepsTTL: "SET k v EX n" through the real handler and cluster
+// write path keeps its TTL on the origin and on every peer. Previously the
+// replicated SET (applied as a stamped LWW write) cleared the TTL on the origin
+// itself, and peers never received it.
+func TestClusterSetEXKeepsTTL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cluster e2e test in -short mode")
+	}
+	nodes := newE2ECluster(t)
+	origin := &Server{kvStore: nodes[0].store, clusterManager: nodes[0].cm}
+	runHandler(t, origin, commands.HandleZeroCopySetWithReplication, "tk", "v", "EX", "3600")
+
+	ok := eventually(10*time.Second, func() bool {
+		for _, n := range nodes {
+			if v, _ := n.store.Get("tk"); v != "v" {
+				return false
+			}
+			if ttl, has := n.store.GetTTL("tk"); !has || ttl < 3500*time.Second {
+				return false
+			}
+		}
+		return true
+	})
+	if !ok {
+		for i, n := range nodes {
+			v, _ := n.store.Get("tk")
+			ttl, has := n.store.GetTTL("tk")
+			t.Logf("node %d: v=%q ttl=%v has=%v", i, v, ttl, has)
+		}
+		t.Fatal("SET EX did not keep its TTL across the cluster")
+	}
+}
+
+// TestClusterExpiredKeyNotResurrected: peers that missed an EXPIRE must still
+// expire the key, instead of serving it forever and handing it back to the
+// origin. Previously the anti-entropy digest carried no TTL, so the peers kept
+// the value with no TTL at all. Now the TTL register travels in the digest and
+// expires the key everywhere. (The reap tombstone that blocks re-sending an
+// already-reaped value is covered at store level, where the reaper is callable.)
+func TestClusterExpiredKeyNotResurrected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cluster e2e test in -short mode")
+	}
+	nodes := newE2ECluster(t)
+	origin := &Server{kvStore: nodes[0].store, clusterManager: nodes[0].cm}
+
+	// A stamped SET reaches every node.
+	origin.replicateWrite("SET", "rk", []byte("v"))
+	if !eventually(10*time.Second, func() bool {
+		for _, n := range nodes {
+			if v, _ := n.store.Get("rk"); v != "v" {
+				return false
+			}
+		}
+		return true
+	}) {
+		t.Fatal("SET did not replicate")
+	}
+
+	// The EXPIRE is applied on the origin only — peers miss it.
+	p, l, o := nodes[0].cm.NextStamp()
+	nodes[0].store.ExpireLWW("rk", time.Now().Add(200*time.Millisecond).UnixNano(), p, l, o)
+
+	time.Sleep(300 * time.Millisecond) // let the deadline pass
+
+	// Peers still serve the key: they never learned of the EXPIRE.
+	if _, ok := nodes[1].store.Get("rk"); !ok {
+		t.Fatal("precondition: peer should still hold the key before anti-entropy")
+	}
+
+	fullReconcile(nodes)
+
+	for i, n := range nodes {
+		if v, ok := n.store.Get("rk"); ok {
+			ttl, has := n.store.GetTTL("rk")
+			t.Fatalf("node %d still serves expired key: v=%q ttl=%v hasTTL=%v", i, v, ttl, has)
+		}
 	}
 }

@@ -51,12 +51,27 @@ type LockFreeShard struct {
 	// late-arriving older write cannot resurrect a key deleted more recently.
 	// Only consulted by the LWW set/delete paths; GC'd by age.
 	tombstones map[string]tombstone
+
+	// ttlRecs is the per-key last-write-wins TTL register (guarded by mu): the
+	// stamp and deadline of the newest EXPIRE/PERSIST seen for a key. It is kept
+	// even while the key is absent, so a TTL op that arrives before the write it
+	// follows still applies when that write lands. A SET newer than the record
+	// supersedes it (clearing the TTL); an older SET leaves it in force.
+	ttlRecs map[string]ttlRec
 }
 
 // tombstone marks a key as deleted at a given LWW stamp, retained until GC.
 type tombstone struct {
 	stamp   hlcStamp
 	deleted time.Time
+}
+
+// ttlRec is one key's TTL register entry. deadline is unix nanos; 0 means
+// persistent (PERSIST). updated is the local time it was recorded, for GC.
+type ttlRec struct {
+	stamp    hlcStamp
+	deadline int64
+	updated  time.Time
 }
 
 // LockFreeStore - оптимізована версія Store з lock-free операціями
@@ -123,6 +138,7 @@ func NewLockFreeStore(limits *Limits) *LockFreeStore {
 			data:       make(map[string]*StoredValue),
 			expiry:     make(map[string]time.Time),
 			tombstones: make(map[string]tombstone),
+			ttlRecs:    make(map[string]ttlRec),
 		}
 	}
 
@@ -225,6 +241,7 @@ func (s *LockFreeStore) DeleteFast(key string) bool {
 	shard.mu.Lock()
 	oldValue, existed := shard.data[key]
 	if existed {
+		recordExpiryTombstone(shard, key, oldValue)
 		delete(shard.data, key)
 	}
 	shard.mu.Unlock()
@@ -377,6 +394,7 @@ func (s *LockFreeStore) deleteExpiredAsync(shard *LockFreeShard, key string) {
 	shard.mu.Lock()
 	oldValue, existed := shard.data[key]
 	if existed {
+		recordExpiryTombstone(shard, key, oldValue)
 		delete(shard.data, key)
 	}
 	shard.mu.Unlock()

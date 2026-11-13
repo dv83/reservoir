@@ -35,6 +35,9 @@ type SyncEntry struct {
 	// List marks a list key: Value holds the encoded RGA element set, reconciled
 	// by merging the delta.
 	List bool `json:"list,omitempty"`
+	// TTL marks a TTL-register entry: Value holds the deadline (unix nanos, as
+	// decimal; "0" means PERSIST), reconciled by the LWW stamp.
+	TTL bool `json:"ttl,omitempty"`
 }
 
 // SyncRequest asks a peer for the LWW digest of one shard.

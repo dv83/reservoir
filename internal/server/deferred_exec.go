@@ -2,6 +2,7 @@ package server
 
 import (
 	"strconv"
+	"time"
 
 	"reservoir/pkg/logger"
 )
@@ -57,7 +58,13 @@ func (s *Server) executeDeferred(cmdType, key string, args []string) {
 			return
 		}
 		if v, ok := s.kvStore.Get(key); ok {
+			// APPEND keeps the TTL; the replicated SET clears it, so re-assert it.
+			ttl, hasTTL := s.kvStore.GetTTL(key)
 			s.replicateWrite("SET", key, []byte(v))
+			if hasTTL {
+				deadline := time.Now().Add(ttl).UnixNano()
+				s.replicateWrite("EXPIRE", key, []byte(strconv.FormatInt(deadline, 10)))
+			}
 		}
 	default:
 		logger.Warning("deferred command type %q is not supported in cluster mode", cmdType)

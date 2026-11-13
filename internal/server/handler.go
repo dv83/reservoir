@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -284,6 +285,22 @@ func (s *Server) replicateWrite(operation, key string, value []byte) {
 				logger.Error("failed to encode list delta for %s: %v", key, err)
 			}
 		}
+	case "EXPIRE", "PERSIST":
+		// TTL changes are a per-key LWW register: stamp them so concurrent
+		// EXPIRE/PERSIST, and their ordering against SETs, converge. value is the
+		// absolute deadline in unix nanos for EXPIRE (nil for PERSIST).
+		var deadline int64
+		if operation == "EXPIRE" {
+			d, err := strconv.ParseInt(string(value), 10, 64)
+			if err != nil {
+				logger.Warning("invalid EXPIRE deadline for %s: %q", key, value)
+				return
+			}
+			deadline = d
+		}
+		p, l, o := s.clusterManager.NextStamp()
+		s.kvStore.ExpireLWW(key, deadline, p, l, o)
+		s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
 	case "DEFER", "DEFER.CANCEL":
 		// Deferred commands are owned by the node that accepted them: only that
 		// node executes them, and executeDeferred replicates the effect through

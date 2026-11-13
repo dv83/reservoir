@@ -49,6 +49,7 @@ type KVStore interface {
 	SetExpiry(key string, expireTime time.Time) bool
 	GetTTL(key string) (time.Duration, bool)
 	RemoveExpiry(key string) bool
+	ExpireLWW(key string, deadline int64, physical int64, logical uint32, origin uint64) bool
 
 	// List операції
 	LPush(key string, elements ...string) (int64, error)

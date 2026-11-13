@@ -90,6 +90,12 @@ func reconcile(into *StoreReplicationHandler, from *StoreReplicationHandler) {
 				op = "COUNTER"
 			case e.List:
 				op = "LDELTA"
+			case e.TTL:
+				if string(e.Value) == "0" {
+					op, value = "PERSIST", nil
+				} else {
+					op = "EXPIRE"
+				}
 			case e.Hash:
 				if e.Deleted {
 					op = "HDEL"

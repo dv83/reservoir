@@ -110,7 +110,9 @@ func HandleZeroCopySetWithReplication(kvStore store.KVStore, cmd *protocol.ZeroC
 	}
 
 	if replicate != nil {
-		replicate("SET", key, []byte(value))
+		// EX/PX/KEEPTTL leave the key with a TTL that the replicated SET would
+		// clear; replicateSetKeepTTL re-asserts it as a stamped EXPIRE.
+		replicateSetKeepTTL(kvStore, replicate, key, []byte(value))
 	}
 
 	_, err = writer.Write(okResponse)
@@ -332,8 +334,9 @@ func HandleZeroCopyAppendWithReplication(kvStore store.KVStore, cmd *protocol.Ze
 
 	// Replicate the operation if callback is provided
 	if replicate != nil {
-		// Replicate the final SET operation rather than APPEND for consistency
-		replicate("SET", key, []byte(finalValue))
+		// Replicate the final SET operation rather than APPEND for consistency.
+		// APPEND keeps the key's TTL, so re-assert it after the SET.
+		replicateSetKeepTTL(kvStore, replicate, key, []byte(finalValue))
 	}
 
 	return writeInteger(writer, result)
@@ -385,4 +388,18 @@ func HandleZeroCopyGetSetWithReplication(kvStore store.KVStore, cmd *protocol.Ze
 	}
 	_, err = writer.Write(nullResponse)
 	return err
+}
+
+// replicateSetKeepTTL replicates a SET of value for a command whose effect leaves
+// the key with a TTL (SET EX/PX/KEEPTTL, APPEND). In cluster mode the SET is
+// applied as a stamped LWW write, which clears the TTL per plain-SET semantics;
+// so the key's remaining TTL is captured first and re-asserted afterwards as a
+// stamped EXPIRE with its absolute deadline (stamped later, so it wins).
+func replicateSetKeepTTL(kvStore store.KVStore, replicate ReplicationCallback, key string, value []byte) {
+	ttl, hasTTL := kvStore.GetTTL(key)
+	replicate("SET", key, value)
+	if hasTTL {
+		deadline := time.Now().Add(ttl).UnixNano()
+		replicate("EXPIRE", key, []byte(strconv.FormatInt(deadline, 10)))
+	}
 }

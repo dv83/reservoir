@@ -182,6 +182,7 @@ func (ebp *ExpiryBatchProcessor) deleteExpiredDirect(shard *LockFreeShard, key s
 	}
 
 	if stillExpired {
+		recordExpiryTombstone(shard, key, oldValue)
 		delete(shard.data, key)
 		shard.expiryMu.Lock()
 		delete(shard.expiry, key)

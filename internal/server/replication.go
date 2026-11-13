@@ -91,6 +91,10 @@ func (h *StoreReplicationHandler) LocalDigest(shardIdx int) []cluster.SyncEntry 
 			HLCOrigin:   e.Origin,
 			Deleted:     e.Deleted,
 			Hash:        e.Hash,
+			TTL:         e.TTL,
+		}
+		if e.TTL {
+			se.Value = []byte(strconv.FormatInt(e.Deadline, 10))
 		}
 		if e.Counter != nil {
 			// Carry the counter state as the encoded value; peers max-merge it.
@@ -417,9 +421,20 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 		if err != nil {
 			return err
 		}
+		// A stamped EXPIRE goes through the TTL register so concurrent TTL
+		// changes, and TTL vs SET ordering, converge; unstamped events (older
+		// senders) fall back to a plain expiry.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			h.Store.ExpireLWW(event.Key, nano, event.HLCPhysical, event.HLCLogical, event.HLCOrigin)
+			return nil
+		}
 		h.Store.SetExpiry(event.Key, time.Unix(0, nano))
 		return nil
 	case "PERSIST":
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			h.Store.ExpireLWW(event.Key, 0, event.HLCPhysical, event.HLCLogical, event.HLCOrigin)
+			return nil
+		}
 		h.Store.RemoveExpiry(event.Key)
 		return nil
 	case "FLUSHALL", "FLUSHDB":

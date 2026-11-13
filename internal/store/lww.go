@@ -84,12 +84,9 @@ func (s *LockFreeStore) SetWithHLC(key, value string, stamp hlcStamp) (bool, err
 	// This write supersedes any tombstone for the key.
 	delete(shard.tombstones, keyCopy)
 
-	// A plain SET clears any previous TTL (Redis semantics), under the same lock.
-	if existed {
-		shard.expiryMu.Lock()
-		delete(shard.expiry, keyCopy)
-		shard.expiryMu.Unlock()
-	}
+	// A SET clears any previous TTL (Redis semantics) — unless a TTL op newer
+	// than this SET has been recorded, in which case that TTL stays in force.
+	s.applyTTLAfterSet(shard, keyCopy, stamp)
 	shard.mu.Unlock()
 
 	if existed {
@@ -186,6 +183,11 @@ func (s *LockFreeStore) gcTombstones(retain time.Duration) int {
 				removed++
 			}
 		}
+		for k, r := range shard.ttlRecs {
+			if r.updated.Before(cutoff) {
+				delete(shard.ttlRecs, k)
+			}
+		}
 		for k, v := range shard.data {
 			if v == nil {
 				continue
@@ -264,6 +266,10 @@ type LWWShardEntry struct {
 	// List, when non-nil, means this entry is a list key: the full RGA element
 	// set, reconciled by merging the delta (idempotent inserts and tombstones).
 	List *ListDelta
+	// TTL marks a TTL-register entry: the key's newest EXPIRE (Deadline in unix
+	// nanos) or PERSIST (Deadline 0), at the stamp, reconciled by LWW.
+	TTL      bool
+	Deadline int64
 }
 
 // ShardCount returns the number of shards, so callers can iterate them.
@@ -323,6 +329,12 @@ func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
 			Key:      k,
 			Physical: t.stamp.TS.Physical, Logical: t.stamp.TS.Logical, Origin: t.stamp.Origin,
 			Deleted: true,
+		})
+	}
+	for k, r := range shard.ttlRecs {
+		entries = append(entries, LWWShardEntry{
+			Key: k, TTL: true, Deadline: r.deadline,
+			Physical: r.stamp.TS.Physical, Logical: r.stamp.TS.Logical, Origin: r.stamp.Origin,
 		})
 	}
 	return entries

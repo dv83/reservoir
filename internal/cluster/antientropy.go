@@ -108,6 +108,13 @@ func (cm *ClusterManager) handleSyncResponse(msg *Message) error {
 		} else if e.List {
 			// RGA element set; apply path merges the delta.
 			op = "LDELTA"
+		} else if e.TTL {
+			// TTL register: the key's newest EXPIRE/PERSIST at its stamp.
+			if string(e.Value) == "0" {
+				op, value = "PERSIST", nil
+			} else {
+				op = "EXPIRE"
+			}
 		} else if e.Hash {
 			// Hash field: HSET if present, HDEL if tombstoned. The apply path
 			// expects "key\x00field[\x00value]".
