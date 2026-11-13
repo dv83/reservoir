@@ -123,9 +123,45 @@ func (c *Compactor) findSegmentsToCompact(currentSegmentID uint64) ([]string, er
 	return segments, nil
 }
 
-// buildCurrentState reads all segments and builds the current state
-func (c *Compactor) buildCurrentState(segments []string) (map[string]*Entry, *compactionStats, error) {
-	state := make(map[string]*Entry)
+// opKind classifies a logged operation by how it affects a key during replay.
+type opKind int
+
+const (
+	// opIncremental modifies an existing key without carrying its full state
+	// (EXPIRE, PERSIST, SADD, SREM, HSET, HMSET, HDEL). It must be kept.
+	opIncremental opKind = iota
+	// opReset fully overwrites the key — value, type and TTL — on replay.
+	opReset
+	// opDelete removes the key (and its TTL).
+	opDelete
+	// opFlushAll clears every key.
+	opFlushAll
+)
+
+// classifyEntry returns how an entry affects replay. Operations the compactor
+// does not recognize are treated as incremental, so they are kept rather than
+// risk collapsing state they carry.
+func classifyEntry(e *Entry) opKind {
+	if e.Type == EntryTypeDelete {
+		return opDelete
+	}
+	switch e.Operation {
+	case "SET", "INCR", "INCRBY", "DECR", "DECRBY":
+		// Counters are logged as their absolute result and replayed as a SET.
+		return opReset
+	case "FLUSHALL", "FLUSHDB":
+		return opFlushAll
+	}
+	return opIncremental
+}
+
+// buildCurrentState reads all segments and returns, per key, the entries that
+// must survive compaction so that replaying them rebuilds exactly the state the
+// original segments do: everything since the key's last reset (SET, absolute
+// counter write, DEL or FLUSHALL). Keeping only the last entry per key — as
+// before — lost the value of a key followed by EXPIRE/PERSIST and every set
+// member or hash field but the last one.
+func (c *Compactor) buildCurrentState(segments []string) (map[string][]*Entry, *compactionStats, error) {
 	stats := &compactionStats{}
 
 	reader, err := NewReader(c.dataDir)
@@ -134,44 +170,52 @@ func (c *Compactor) buildCurrentState(segments []string) (map[string]*Entry, *co
 	}
 	defer reader.Close()
 
-	// Process each segment in order
+	var all []*Entry
 	for _, segment := range segments {
 		err := reader.readSegment(segment, func(entry *Entry) error {
 			stats.totalEntries++
-			key := string(entry.Key)
-
-			switch entry.Type {
-			case EntryTypeWrite:
-				// Check if this is a newer version
-				if existing, ok := state[key]; !ok || entry.Timestamp > existing.Timestamp {
-					state[key] = entry
-				}
-			case EntryTypeDelete:
-				// Remove from state if this delete is newer
-				if existing, ok := state[key]; ok && entry.Timestamp > existing.Timestamp {
-					delete(state, key)
-				}
-			}
-
+			all = append(all, entry)
 			return nil
 		})
-
 		if err != nil {
 			return nil, nil, err
 		}
 	}
 
-	// Calculate live entries
-	stats.liveEntries = len(state)
-	for _, entry := range state {
-		stats.liveBytes += int64(len(entry.Key) + len(entry.Value))
+	// Recovery replays entries in timestamp order, not file order, so decide
+	// what survives in that same order. Stable, to keep file order on ties.
+	sort.SliceStable(all, func(i, j int) bool { return all[i].Timestamp < all[j].Timestamp })
+
+	state := make(map[string][]*Entry)
+	for _, entry := range all {
+		key := string(entry.Key)
+		switch classifyEntry(entry) {
+		case opFlushAll:
+			// Everything before it is cleared on replay. The FLUSHALL itself is
+			// dropped too: compaction covers the oldest segments contiguously and
+			// recovery starts from an empty store, so nothing before it survives.
+			state = make(map[string][]*Entry)
+		case opDelete:
+			delete(state, key)
+		case opReset:
+			state[key] = []*Entry{entry}
+		default:
+			state[key] = append(state[key], entry)
+		}
+	}
+
+	for _, entries := range state {
+		stats.liveEntries += len(entries)
+		for _, entry := range entries {
+			stats.liveBytes += int64(len(entry.Key) + len(entry.Value))
+		}
 	}
 
 	return state, stats, nil
 }
 
 // writeCompactedSegment writes the compacted state to a new segment
-func (c *Compactor) writeCompactedSegment(state map[string]*Entry, oldestSegment string) (string, error) {
+func (c *Compactor) writeCompactedSegment(state map[string][]*Entry, oldestSegment string) (string, error) {
 	// Create temporary file for compacted segment
 	tempFile := filepath.Join(c.dataDir, fmt.Sprintf("compact_%d.tmp", time.Now().UnixNano()))
 
@@ -197,18 +241,18 @@ func (c *Compactor) writeCompactedSegment(state map[string]*Entry, oldestSegment
 		},
 	}
 
-	// Write all entries, PRESERVING each entry's original timestamp. Recovery
+	// Write every retained entry, PRESERVING its original timestamp. Recovery
 	// sorts every entry across all segments by timestamp, so stamping compacted
-	// entries with time.Now() would make these (old) last-write values appear
-	// newer than writes already recorded in the live current segment and
-	// resurrect stale data. Each state[key] entry already holds the timestamp of
-	// that key's most recent write, which is exactly where it must sort.
+	// entries with time.Now() would make these (old) values appear newer than
+	// writes already recorded in the live current segment and resurrect stale
+	// data. Each key's entries are already in timestamp order.
 	for _, key := range keys {
-		entry := state[key]
-		entry.CRC = entry.CalculateCRC() // CRC is unchanged, recomputed defensively
+		for _, entry := range state[key] {
+			entry.CRC = entry.CalculateCRC() // CRC is unchanged, recomputed defensively
 
-		if err := cl.writeEntry(entry); err != nil {
-			return "", fmt.Errorf("failed to write entry: %w", err)
+			if err := cl.writeEntry(entry); err != nil {
+				return "", fmt.Errorf("failed to write entry: %w", err)
+			}
 		}
 	}
 

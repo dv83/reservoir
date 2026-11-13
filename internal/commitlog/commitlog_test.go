@@ -33,12 +33,14 @@ func TestCompactionPreservesTimestamps(t *testing.T) {
 	dir := t.TempDir()
 	c := NewCompactor(dir)
 
-	state := map[string]*Entry{
-		"a": {Type: EntryTypeWrite, Timestamp: 100, Operation: "SET", Key: []byte("a"), Value: []byte("va")},
-		"b": {Type: EntryTypeWrite, Timestamp: 200, Operation: "SET", Key: []byte("b"), Value: []byte("vb")},
+	state := map[string][]*Entry{
+		"a": {{Type: EntryTypeWrite, Timestamp: 100, Operation: "SET", Key: []byte("a"), Value: []byte("va")}},
+		"b": {{Type: EntryTypeWrite, Timestamp: 200, Operation: "SET", Key: []byte("b"), Value: []byte("vb")}},
 	}
-	for _, e := range state {
-		e.CRC = e.CalculateCRC()
+	for _, entries := range state {
+		for _, e := range entries {
+			e.CRC = e.CalculateCRC()
+		}
 	}
 
 	oldest := filepath.Join(dir, "0000000000000001"+SegmentFileExtension)
