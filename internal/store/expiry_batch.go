@@ -158,18 +158,25 @@ func (ebp *ExpiryBatchProcessor) removeExpiryDirect(shard *LockFreeShard, key st
 	shard.expiryMu.Unlock()
 }
 
-// deleteExpiredDirect deletes expired key from store and expiry map directly.
-//
-// The deletion is queued by the cleaner and processed up to a flush interval
-// later. In that window a SET may have rewritten the key and cleared or renewed
-// its TTL, so we MUST re-verify the key is still present and still expired
-// inside the critical section — otherwise we would destroy a fresh value and
-// drop the new TTL.
+// deleteExpiredDirect reclaims a key the cleaner queued as expired; see
+// reapExpired.
 func (ebp *ExpiryBatchProcessor) deleteExpiredDirect(shard *LockFreeShard, key string) {
-	// Check the value and its TTL, and remove both, all under the single shard
-	// lock. SET clears/renews the expiry under this same lock, so holding it
-	// across the check-and-delete makes the two operations serialize: if the key
-	// was rewritten we observe the cleared/renewed expiry and leave it alone.
+	reapExpired(ebp.store, shard, key)
+}
+
+// reapExpired removes key's value and TTL if its deadline has passed, and
+// reports whether it did. It is the single implementation behind both the
+// background reaper and lazy expiry on access (LockFreeStore.expireIfNeeded).
+//
+// The caller's view of the deadline may be stale: the reaper queues deletions
+// and processes them up to a flush interval later, and a lazy check reads the
+// deadline before taking any lock. In that window a SET may have rewritten the
+// key and cleared or renewed its TTL, so the deadline is re-checked inside the
+// shard lock — SET clears/renews the expiry under this same lock — and a
+// renewed key is left alone. In cluster mode an expiry tombstone at the value's
+// stamp keeps a stale replica from resurrecting the key. store may be nil (no
+// accounting), as in tests that build a processor on its own.
+func reapExpired(store *LockFreeStore, shard *LockFreeShard, key string) bool {
 	shard.mu.Lock()
 	oldValue, existed := shard.data[key]
 
@@ -190,24 +197,23 @@ func (ebp *ExpiryBatchProcessor) deleteExpiredDirect(shard *LockFreeShard, key s
 	}
 	shard.mu.Unlock()
 
-	// Only mutate accounting when we actually reaped the key. If the key was
-	// renewed we leave both its value and its new TTL intact.
 	if !stillExpired {
-		return
+		return false
 	}
 
-	if ebp.store != nil {
+	if store != nil {
 		keyLen := int64(len(key))
-		shardIdx := int(FastHash(key) & ebp.store.shardMask)
+		shardIdx := int(FastHash(key) & store.shardMask)
 
 		if oldValue != nil {
 			memoryDelta := -(keyLen + oldValue.MemoryUsage())
-			ebp.store.asyncMetrics.AddMemoryUpdate(shardIdx, memoryDelta)
+			store.asyncMetrics.AddMemoryUpdate(shardIdx, memoryDelta)
 			oldValue.Release()
 		}
 
-		ebp.store.asyncMetrics.AddKeyUpdate(shardIdx, -1)
+		store.asyncMetrics.AddKeyUpdate(shardIdx, -1)
 	}
+	return true
 }
 
 // Stop stops the batch processor

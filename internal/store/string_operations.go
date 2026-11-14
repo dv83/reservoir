@@ -22,6 +22,7 @@ type SetOptions struct {
 // under the shard lock. It returns whether the write was applied (false when an
 // NX/XX condition was not met).
 func (s *LockFreeStore) SetWithOptions(key, value string, opts SetOptions) (bool, error) {
+	s.expireIfNeeded(key)
 	keyLen := int64(len(key))
 	valueLen := int64(len(value))
 	if keyLen > s.limits.MaxKeySize {
@@ -192,6 +193,7 @@ func (s *LockFreeStore) Get(key string) (string, bool) {
 
 // Delete removes a key - OPTIMIZED
 func (s *LockFreeStore) Delete(key string) bool {
+	s.expireIfNeeded(key)
 	hash := FastHash(key)
 	shard := s.shards[int(hash&s.shardMask)]
 
@@ -231,6 +233,9 @@ func (s *LockFreeStore) Delete(key string) bool {
 
 // Exists checks if keys exist - OPTIMIZED
 func (s *LockFreeStore) Exists(keys ...string) int64 {
+	for _, k := range keys {
+		s.expireIfNeeded(k)
+	}
 	var count int64
 	for _, key := range keys {
 		hash := FastHash(key)
@@ -250,6 +255,7 @@ func (s *LockFreeStore) Exists(keys ...string) int64 {
 
 // IncrBy increments integer value - OPTIMIZED
 func (s *LockFreeStore) IncrBy(key string, increment int64) (int64, error) {
+	s.expireIfNeeded(key)
 	hash := FastHash(key)
 	shard := s.shards[int(hash&s.shardMask)]
 
@@ -342,6 +348,7 @@ func (s *LockFreeStore) DecrBy(key string, decrement int64) (int64, error) {
 
 // Append appends value to string - OPTIMIZED
 func (s *LockFreeStore) Append(key, value string) (int64, error) {
+	s.expireIfNeeded(key)
 	hash := FastHash(key)
 	shard := s.shards[int(hash&s.shardMask)]
 
@@ -385,6 +392,7 @@ func (s *LockFreeStore) Append(key, value string) (int64, error) {
 
 // StrLen returns string length - OPTIMIZED
 func (s *LockFreeStore) StrLen(key string) (int64, error) {
+	s.expireIfNeeded(key)
 	hash := FastHash(key)
 	shard := s.shards[int(hash&s.shardMask)]
 
@@ -406,6 +414,7 @@ func (s *LockFreeStore) StrLen(key string) (int64, error) {
 
 // GetSet atomically sets value and returns old value - OPTIMIZED
 func (s *LockFreeStore) GetSet(key, value string) (string, bool, error) {
+	s.expireIfNeeded(key)
 	hash := FastHash(key)
 	shard := s.shards[int(hash&s.shardMask)]
 

@@ -172,6 +172,9 @@ func (s *LockFreeStore) CounterState(key string) (CounterState, bool) {
 // returns the materialized value. Merge is max-based, so applying the same
 // snapshot repeatedly or out of order converges without double-counting.
 func (s *LockFreeStore) MergeCounter(key string, st CounterState) (int64, error) {
+	// Never merge a write into an expired copy: reclaim it first, as the
+	// node that issued the write did (see expireIfNeeded).
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()

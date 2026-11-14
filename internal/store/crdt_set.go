@@ -206,6 +206,9 @@ func (sv *SetValue) gcElementTombstones(cutoffNanos int64) (pruned int, empty bo
 // event). Each member is added at the given stamp; members already superseded by
 // a newer remove stay absent. Returns the number of members that became present.
 func (s *LockFreeStore) SAddLWW(key string, physical int64, logical uint32, origin uint64, members ...string) (int64, error) {
+	// Never merge a write into an expired copy: reclaim it first, as the
+	// node that issued the write did (see expireIfNeeded).
+	s.expireIfNeeded(key)
 	if len(members) == 0 {
 		return 0, nil
 	}
@@ -266,6 +269,9 @@ func (s *LockFreeStore) SAddLWW(key string, physical int64, logical uint32, orig
 // a set left materially empty is retained to keep its element tombstones.
 // Returns the number of members that were present and are now removed.
 func (s *LockFreeStore) SRemLWW(key string, physical int64, logical uint32, origin uint64, members ...string) (int64, error) {
+	// Never merge a write into an expired copy: reclaim it first, as the
+	// node that issued the write did (see expireIfNeeded).
+	s.expireIfNeeded(key)
 	if len(members) == 0 {
 		return 0, nil
 	}

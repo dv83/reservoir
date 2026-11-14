@@ -371,6 +371,32 @@ func (s *LockFreeStore) updateAverageSizes(shard *LockFreeShard, keyLen, valueLe
 	atomic.StoreInt64(&shard.avgValueSize, newAvgValue)
 }
 
+// expireIfNeeded reclaims key if its deadline has passed, so the command that
+// called it sees a missing key — Redis's lazy expiry. Every client-facing
+// command calls it for each key it addresses before taking any lock. Reclaiming
+// here is exactly the background reaper running at this instant (reapExpired),
+// which replication already tolerates at any moment, so it adds no new state.
+//
+// It does nothing during recovery: replay rebuilds the state as of each logged
+// write, and judging those writes by the current clock would drop a key before a
+// later logged EXPIRE extends it.
+//
+// Container apply paths (SAddLWW, SRemLWW, HSetLWW, HDelLWW, ApplyListDelta,
+// MergeCounter) call it too: the issuing node reclaimed its expired copy before
+// writing, so every replica must do the same rather than merge the write into
+// the expired copy — otherwise a later reclaim would remove the new write with
+// the old key on some nodes only. ExpireLWW does not, so a TTL extension sent by
+// a node whose clock still considered the key live is not dropped.
+func (s *LockFreeStore) expireIfNeeded(key string) {
+	if atomic.LoadUint32(&s.recoveryActive) != 0 {
+		return
+	}
+	shard := s.getShard(key)
+	if s.isExpiredFast(shard, key) {
+		reapExpired(s, shard, key)
+	}
+}
+
 // isExpiredFast - швидка перевірка expiry без блокувань
 func (s *LockFreeStore) isExpiredFast(shard *LockFreeShard, key string) bool {
 	shard.expiryMu.RLock()
@@ -482,6 +508,7 @@ func (s *LockFreeStore) logStringWrite(shard *LockFreeShard, op, key, value stri
 
 // SetExpiry - встановлення expiry для існуючого ключа
 func (s *LockFreeStore) SetExpiry(key string, expireTime time.Time) bool {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	// Check if key exists in the store
@@ -502,6 +529,7 @@ func (s *LockFreeStore) SetExpiry(key string, expireTime time.Time) bool {
 
 // GetTTL - отримання TTL для ключа
 func (s *LockFreeStore) GetTTL(key string) (time.Duration, bool) {
+	s.expireIfNeeded(key)
 	shard := s.getShardFast(key)
 
 	shard.expiryMu.RLock()
@@ -522,6 +550,7 @@ func (s *LockFreeStore) GetTTL(key string) (time.Duration, bool) {
 
 // RemoveExpiry - видалення expiry для ключа
 func (s *LockFreeStore) RemoveExpiry(key string) bool {
+	s.expireIfNeeded(key)
 	shard := s.getShardFast(key)
 
 	shard.expiryMu.Lock()

@@ -11,6 +11,7 @@ import (
 // Set operations for the LockFreeStore
 
 func (s *LockFreeStore) SAdd(key string, members ...string) (int64, error) {
+	s.expireIfNeeded(key)
 	if len(members) == 0 {
 		return 0, nil
 	}
@@ -81,6 +82,7 @@ func (s *LockFreeStore) SAdd(key string, members ...string) (int64, error) {
 
 // SRem removes one or more members from a set
 func (s *LockFreeStore) SRem(key string, members ...string) (int64, error) {
+	s.expireIfNeeded(key)
 	if len(members) == 0 {
 		return 0, nil
 	}
@@ -128,6 +130,7 @@ func (s *LockFreeStore) SRem(key string, members ...string) (int64, error) {
 
 // SIsMember checks if member is in the set
 func (s *LockFreeStore) SIsMember(key string, member string) (bool, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.RLock()
@@ -148,6 +151,7 @@ func (s *LockFreeStore) SIsMember(key string, member string) (bool, error) {
 
 // SCard returns the cardinality (size) of the set
 func (s *LockFreeStore) SCard(key string) (int64, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.RLock()
@@ -169,6 +173,7 @@ func (s *LockFreeStore) SCard(key string) (int64, error) {
 
 // SMembers returns all members of the set
 func (s *LockFreeStore) SMembers(key string) ([]string, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.RLock()
@@ -189,6 +194,7 @@ func (s *LockFreeStore) SMembers(key string) ([]string, error) {
 
 // SPop removes and returns a random member from the set
 func (s *LockFreeStore) SPop(key string) (string, bool, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.Lock()
@@ -233,6 +239,9 @@ func (s *LockFreeStore) SPop(key string) (string, bool, error) {
 
 // SDiff returns members in the first set that are not in the other sets
 func (s *LockFreeStore) SDiff(keys ...string) ([]string, error) {
+	for _, k := range keys {
+		s.expireIfNeeded(k)
+	}
 	if len(keys) == 0 {
 		return []string{}, nil
 	}
@@ -285,6 +294,9 @@ func (s *LockFreeStore) SDiff(keys ...string) ([]string, error) {
 
 // SInter returns members that are in all sets
 func (s *LockFreeStore) SInter(keys ...string) ([]string, error) {
+	for _, k := range keys {
+		s.expireIfNeeded(k)
+	}
 	if len(keys) == 0 {
 		return []string{}, nil
 	}
@@ -330,6 +342,9 @@ func (s *LockFreeStore) SInter(keys ...string) ([]string, error) {
 
 // SUnion returns all members from all sets
 func (s *LockFreeStore) SUnion(keys ...string) ([]string, error) {
+	for _, k := range keys {
+		s.expireIfNeeded(k)
+	}
 	if len(keys) == 0 {
 		return []string{}, nil
 	}
@@ -359,6 +374,7 @@ func (s *LockFreeStore) SUnion(keys ...string) ([]string, error) {
 
 // SDiffStore computes the difference between sets and stores result in destination key
 func (s *LockFreeStore) SDiffStore(destination string, keys ...string) (int64, error) {
+	s.expireIfNeeded(destination)
 	if len(keys) == 0 {
 		return 0, nil
 	}
@@ -385,6 +401,7 @@ func (s *LockFreeStore) SDiffStore(destination string, keys ...string) (int64, e
 
 // SStats returns detailed statistics about a set including LSM-tree status
 func (s *LockFreeStore) SStats(key string) (map[string]interface{}, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.RLock()

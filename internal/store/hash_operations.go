@@ -11,6 +11,7 @@ import (
 // Hash operations for the LockFreeStore
 
 func (s *LockFreeStore) HSet(key string, fieldValues ...string) (int64, error) {
+	s.expireIfNeeded(key)
 	if len(fieldValues)%2 != 0 {
 		return 0, errors.New("wrong number of arguments for hash set")
 	}
@@ -81,6 +82,7 @@ func (s *LockFreeStore) HSet(key string, fieldValues ...string) (int64, error) {
 
 // HGet gets a field value from a hash
 func (s *LockFreeStore) HGet(key, field string) (string, bool, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.RLock()
@@ -102,6 +104,7 @@ func (s *LockFreeStore) HGet(key, field string) (string, bool, error) {
 
 // HMGet gets multiple field values from a hash
 func (s *LockFreeStore) HMGet(key string, fields ...string) ([]string, []bool, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.RLock()
@@ -138,6 +141,7 @@ func (s *LockFreeStore) HMGet(key string, fields ...string) ([]string, []bool, e
 
 // HDel deletes field(s) from a hash
 func (s *LockFreeStore) HDel(key string, fields ...string) (int64, error) {
+	s.expireIfNeeded(key)
 	if len(fields) == 0 {
 		return 0, nil
 	}
@@ -182,6 +186,7 @@ func (s *LockFreeStore) HDel(key string, fields ...string) (int64, error) {
 
 // HExists checks if field exists in a hash
 func (s *LockFreeStore) HExists(key, field string) (bool, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.RLock()
@@ -202,6 +207,7 @@ func (s *LockFreeStore) HExists(key, field string) (bool, error) {
 
 // HLen gets number of fields in a hash
 func (s *LockFreeStore) HLen(key string) (int64, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.RLock()
@@ -222,6 +228,7 @@ func (s *LockFreeStore) HLen(key string) (int64, error) {
 
 // HKeys gets all field names in a hash
 func (s *LockFreeStore) HKeys(key string) ([]string, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.RLock()
@@ -242,6 +249,7 @@ func (s *LockFreeStore) HKeys(key string) ([]string, error) {
 
 // HVals gets all values in a hash
 func (s *LockFreeStore) HVals(key string) ([]string, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.RLock()
@@ -262,6 +270,7 @@ func (s *LockFreeStore) HVals(key string) ([]string, error) {
 
 // HGetAll gets all field-value pairs in a hash
 func (s *LockFreeStore) HGetAll(key string) ([]string, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.RLock()
@@ -282,6 +291,7 @@ func (s *LockFreeStore) HGetAll(key string) ([]string, error) {
 
 // HIncrBy increments a field's integer value
 func (s *LockFreeStore) HIncrBy(key, field string, increment int64) (int64, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.Lock()
@@ -344,6 +354,7 @@ func (s *LockFreeStore) HIncrBy(key, field string, increment int64) (int64, erro
 
 // HIncrByFloat increments a field's float value
 func (s *LockFreeStore) HIncrByFloat(key, field string, increment float64) (float64, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	shard.mu.Lock()

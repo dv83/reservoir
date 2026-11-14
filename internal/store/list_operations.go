@@ -59,6 +59,7 @@ func newStoredList(list *ListValue) *StoredValue {
 
 // LPush adds elements to the head of a list (O(1) amortized with in-place modification)
 func (s *LockFreeStore) LPush(key string, elements ...string) (int64, error) {
+	s.expireIfNeeded(key)
 	if s.isListCRDT() {
 		return s.pushCRDT(key, true, elements...)
 	}
@@ -122,6 +123,7 @@ func (s *LockFreeStore) LPush(key string, elements ...string) (int64, error) {
 
 // RPush adds elements to the tail of a list (O(1) amortized with in-place modification)
 func (s *LockFreeStore) RPush(key string, elements ...string) (int64, error) {
+	s.expireIfNeeded(key)
 	if s.isListCRDT() {
 		return s.pushCRDT(key, false, elements...)
 	}
@@ -185,6 +187,7 @@ func (s *LockFreeStore) RPush(key string, elements ...string) (int64, error) {
 
 // LLen returns the length of a list
 func (s *LockFreeStore) LLen(key string) (int64, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	raw, exists := s.readValue(shard, key)
@@ -201,6 +204,7 @@ func (s *LockFreeStore) LLen(key string) (int64, error) {
 
 // LPop removes and returns elements from the head of a list
 func (s *LockFreeStore) LPop(key string, count int) ([]string, error) {
+	s.expireIfNeeded(key)
 	if count < 0 {
 		return nil, fmt.Errorf("value is out of range, must be positive")
 	}
@@ -254,6 +258,7 @@ func (s *LockFreeStore) LPop(key string, count int) ([]string, error) {
 
 // RPop removes and returns elements from the tail of a list
 func (s *LockFreeStore) RPop(key string, count int) ([]string, error) {
+	s.expireIfNeeded(key)
 	if count < 0 {
 		return nil, fmt.Errorf("value is out of range, must be positive")
 	}
@@ -307,6 +312,7 @@ func (s *LockFreeStore) RPop(key string, count int) ([]string, error) {
 
 // LRange returns a range of elements from a list
 func (s *LockFreeStore) LRange(key string, start, stop int64) ([]string, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	raw, exists := s.readValue(shard, key)
@@ -323,6 +329,7 @@ func (s *LockFreeStore) LRange(key string, start, stop int64) ([]string, error) 
 
 // LIndex returns the element at index in a list
 func (s *LockFreeStore) LIndex(key string, index int64) (string, bool, error) {
+	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
 	raw, exists := s.readValue(shard, key)
@@ -347,6 +354,7 @@ func (s *LockFreeStore) LIndex(key string, index int64) (string, bool, error) {
 // changing the *StoredValue pointer, so a concurrent push would pass the CAS
 // pointer check and be silently discarded by the swap.
 func (s *LockFreeStore) LSet(key string, index int64, element string) error {
+	s.expireIfNeeded(key)
 	if s.isListCRDT() {
 		return s.lsetCRDT(key, index, element)
 	}
@@ -377,6 +385,7 @@ func (s *LockFreeStore) LSet(key string, index int64, element string) error {
 
 // LRem removes elements from a list (in-place under the shard write lock).
 func (s *LockFreeStore) LRem(key string, count int64, element string) (int64, error) {
+	s.expireIfNeeded(key)
 	if s.isListCRDT() {
 		return s.lremCRDT(key, count, element)
 	}
@@ -412,6 +421,7 @@ func (s *LockFreeStore) LRem(key string, count int64, element string) (int64, er
 
 // LTrim trims a list to the specified range (in-place under the shard write lock).
 func (s *LockFreeStore) LTrim(key string, start, stop int64) error {
+	s.expireIfNeeded(key)
 	if s.isListCRDT() {
 		return s.ltrimCRDT(key, start, stop)
 	}
@@ -447,6 +457,7 @@ func (s *LockFreeStore) LTrim(key string, start, stop int64) error {
 
 // LPushX pushes elements only if key exists (O(1) with in-place modification)
 func (s *LockFreeStore) LPushX(key string, elements ...string) (int64, error) {
+	s.expireIfNeeded(key)
 	if len(elements) == 0 {
 		return 0, fmt.Errorf("wrong number of arguments for 'lpushx' command")
 	}
@@ -487,6 +498,7 @@ func (s *LockFreeStore) LPushX(key string, elements ...string) (int64, error) {
 
 // RPushX pushes elements only if key exists (O(1) with in-place modification)
 func (s *LockFreeStore) RPushX(key string, elements ...string) (int64, error) {
+	s.expireIfNeeded(key)
 	if len(elements) == 0 {
 		return 0, fmt.Errorf("wrong number of arguments for 'rpushx' command")
 	}
@@ -527,6 +539,7 @@ func (s *LockFreeStore) RPushX(key string, elements ...string) (int64, error) {
 
 // LPushUnique pushes only unique elements to the head (in-place modification)
 func (s *LockFreeStore) LPushUnique(key string, elements ...string) (int64, error) {
+	s.expireIfNeeded(key)
 	if len(elements) == 0 {
 		return 0, fmt.Errorf("wrong number of arguments for 'lpushunique' command")
 	}
@@ -581,6 +594,7 @@ func (s *LockFreeStore) LPushUnique(key string, elements ...string) (int64, erro
 
 // RPushUnique pushes only unique elements to the tail (in-place modification)
 func (s *LockFreeStore) RPushUnique(key string, elements ...string) (int64, error) {
+	s.expireIfNeeded(key)
 	if len(elements) == 0 {
 		return 0, fmt.Errorf("wrong number of arguments for 'rpushunique' command")
 	}

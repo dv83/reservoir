@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"reflect"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -428,5 +430,66 @@ func TestClusterExpiredKeyNotResurrected(t *testing.T) {
 			ttl, has := n.store.GetTTL("rk")
 			t.Fatalf("node %d still serves expired key: v=%q ttl=%v hasTTL=%v", i, v, ttl, has)
 		}
+	}
+}
+
+// TestClusterWriteAfterExpiryStartsFresh (fix-expired-key-access, task 2.3): an
+// SADD on a set whose deadline has passed starts a new set with no TTL on the
+// node that ran it, and every node converges on that new set — none keeps the
+// expired members, and none reaps the new member together with the old set.
+func TestClusterWriteAfterExpiryStartsFresh(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cluster e2e test in -short mode")
+	}
+	nodes := newE2ECluster(t)
+	origin := &Server{kvStore: nodes[0].store, clusterManager: nodes[0].cm}
+	writer := &Server{kvStore: nodes[1].store, clusterManager: nodes[1].cm}
+
+	runHandler(t, origin, commands.HandleZeroCopySAddWithReplication, "es", "a", "b")
+	deadline := time.Now().Add(300 * time.Millisecond)
+	origin.replicateWrite("EXPIRE", "es", []byte(strconv.FormatInt(deadline.UnixNano(), 10)))
+	nodes[0].store.SetExpiry("es", deadline)
+	if !eventually(10*time.Second, func() bool {
+		for _, n := range nodes {
+			if _, has := n.store.GetTTL("es"); !has {
+				return false
+			}
+		}
+		return true
+	}) {
+		t.Fatal("set and its TTL did not replicate")
+	}
+	time.Sleep(time.Until(deadline) + 100*time.Millisecond)
+
+	// The reaper has not run (it runs every minute): the old set is still
+	// stored everywhere, just expired.
+	runHandler(t, writer, commands.HandleZeroCopySAddWithReplication, "es", "c")
+
+	want := []string{"c"}
+	converged := func() bool {
+		for _, n := range nodes {
+			m, _ := n.store.SMembers("es")
+			sort.Strings(m)
+			if !reflect.DeepEqual(m, want) {
+				return false
+			}
+			if _, has := n.store.GetTTL("es"); has {
+				return false
+			}
+		}
+		return true
+	}
+	ok := eventually(10*time.Second, converged)
+	if ok {
+		fullReconcile(nodes)
+		ok = converged()
+	}
+	if !ok {
+		for i, n := range nodes {
+			m, _ := n.store.SMembers("es")
+			ttl, has := n.store.GetTTL("es")
+			t.Logf("node %d: members=%v ttl=%v has=%v", i, m, ttl, has)
+		}
+		t.Fatalf("nodes did not converge on %v with no TTL", want)
 	}
 }

@@ -177,6 +177,9 @@ func (hv *HashValue) gcFieldTombstones(cutoffNanos int64) (pruned int, empty boo
 // by a newer write to the same field stays as-is. Returns the number of fields
 // newly created.
 func (s *LockFreeStore) HSetLWW(key string, physical int64, logical uint32, origin uint64, fieldValues ...string) (int64, error) {
+	// Never merge a write into an expired copy: reclaim it first, as the
+	// node that issued the write did (see expireIfNeeded).
+	s.expireIfNeeded(key)
 	if len(fieldValues)%2 != 0 {
 		return 0, pkgErrors.ErrWrongType
 	}
@@ -220,6 +223,9 @@ func (s *LockFreeStore) HSetLWW(key string, physical int64, logical uint32, orig
 // its field tombstones. Returns the number of fields that were present and are
 // now removed.
 func (s *LockFreeStore) HDelLWW(key string, physical int64, logical uint32, origin uint64, fields ...string) (int64, error) {
+	// Never merge a write into an expired copy: reclaim it first, as the
+	// node that issued the write did (see expireIfNeeded).
+	s.expireIfNeeded(key)
 	if len(fields) == 0 {
 		return 0, nil
 	}

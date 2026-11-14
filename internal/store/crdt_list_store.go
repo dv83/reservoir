@@ -470,6 +470,9 @@ func (s *LockFreeStore) DrainListDelta(key string) (ListDelta, bool) {
 // the result. Inserts/updates go through the LWW insert path and deletes through
 // the tombstone path, so application is idempotent and order-independent.
 func (s *LockFreeStore) ApplyListDelta(key string, delta ListDelta) error {
+	// Never merge a write into an expired copy: reclaim it first, as the
+	// node that issued the write did (see expireIfNeeded).
+	s.expireIfNeeded(key)
 	if len(delta.Elems) == 0 {
 		return nil
 	}
