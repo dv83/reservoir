@@ -85,11 +85,7 @@ func (s *LockFreeStore) SetWithOptions(key, value string, opts SetOptions) (bool
 		s.accountKeyAdded(shard, memoryDelta)
 	}
 
-	if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {
-		if cl, ok := s.commitLog.(CommitLogger); ok {
-			cl.Write("SET", []byte(key), []byte(value))
-		}
-	}
+	s.logStringWrite(shard, "SET", key, value)
 
 	return true, nil
 }
@@ -157,12 +153,8 @@ func (s *LockFreeStore) Set(key, value string) error {
 		s.accountKeyAdded(shard, memoryDelta) // memoryDelta == storedValue.memorySize for a new key
 	}
 
-	// ASYNC: Commit log in background (if enabled AND not in recovery mode)
-	if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {
-		if cl, ok := s.commitLog.(CommitLogger); ok {
-			cl.Write("SET", []byte(key), []byte(value))
-		}
-	}
+	// Commit log (if enabled and not replaying recovery), restating any TTL.
+	s.logStringWrite(shard, "SET", key, value)
 
 	return nil
 }
@@ -327,12 +319,8 @@ func (s *LockFreeStore) IncrBy(key string, increment int64) (int64, error) {
 		s.accountKeyAdded(shard, newSV.memorySize)
 	}
 
-	// Write to commit log asynchronously (if not in recovery mode)
-	if atomic.LoadUint32(&s.recoveryActive) == 0 {
-		if cl, ok := s.commitLog.(CommitLogger); ok && cl != nil {
-			cl.Write("INCRBY", []byte(key), []byte(newValueStr))
-		}
-	}
+	// Log the absolute result; INCR keeps the TTL, so restate it.
+	s.logStringWrite(shard, "INCRBY", key, newValueStr)
 
 	return newValue, nil
 }
@@ -389,6 +377,9 @@ func (s *LockFreeStore) Append(key, value string) (int64, error) {
 		s.accountKeyAdded(shard, newSV.memorySize)
 	}
 
+	// Log the resulting value; APPEND keeps the TTL, so restate it.
+	s.logStringWrite(shard, "SET", key, newValue)
+
 	return int64(len(newValue)), nil
 }
 
@@ -439,7 +430,13 @@ func (s *LockFreeStore) GetSet(key, value string) (string, bool, error) {
 		memorySize: int64(len(key) + len(value)),
 	}
 	shard.data[key] = newSV
+	// GETSET discards any TTL, as SET does (Redis semantics).
+	shard.expiryMu.Lock()
+	delete(shard.expiry, key)
+	shard.expiryMu.Unlock()
 	shard.mu.Unlock()
+
+	s.logStringWrite(shard, "SET", key, value)
 
 	if existed && oldStoredValue != nil {
 		s.accountMemoryDelta(shard, newSV.memorySize-oldMem)

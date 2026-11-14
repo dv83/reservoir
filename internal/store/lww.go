@@ -95,11 +95,8 @@ func (s *LockFreeStore) SetWithHLC(key, value string, stamp hlcStamp) (bool, err
 		s.accountKeyAdded(shard, memoryDelta)
 	}
 
-	if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {
-		if cl, ok := s.commitLog.(CommitLogger); ok {
-			cl.Write("SET", []byte(key), []byte(value))
-		}
-	}
+	// Log the value, restating the TTL if a newer TTL op kept it in force.
+	s.logStringWrite(shard, "SET", key, value)
 
 	return true, nil
 }

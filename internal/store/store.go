@@ -456,6 +456,30 @@ func (s *LockFreeStore) logToCommitLog(op string, key, value []byte) {
 	}
 }
 
+// logStringWrite logs a string-value write — SET, or INCRBY carrying the absolute
+// result — and, when the key keeps a TTL, an EXPIRE with its absolute deadline
+// right after it. Recovery replays the value entry as a full overwrite that
+// clears the TTL, so writes that set or keep a TTL (SET EX/PX/KEEPTTL, APPEND,
+// counters, LWW SETs under a newer TTL) must restate it to survive a restart.
+// The deadline is read and both entries are logged under the expiry read lock;
+// TTL changes take the write lock, so a concurrent EXPIRE or PERSIST is applied
+// and logged entirely before or after the pair, never between its entries.
+func (s *LockFreeStore) logStringWrite(shard *LockFreeShard, op, key, value string) {
+	if atomic.LoadUint32(&s.commitLogActive) != 1 || atomic.LoadUint32(&s.recoveryActive) != 0 {
+		return
+	}
+	cl, ok := s.commitLog.(CommitLogger)
+	if !ok || cl == nil {
+		return
+	}
+	shard.expiryMu.RLock()
+	defer shard.expiryMu.RUnlock()
+	cl.Write(op, []byte(key), []byte(value))
+	if exp, has := shard.expiry[key]; has {
+		cl.Write("EXPIRE", []byte(key), []byte(strconv.FormatInt(exp.UnixNano(), 10)))
+	}
+}
+
 // SetExpiry - встановлення expiry для існуючого ключа
 func (s *LockFreeStore) SetExpiry(key string, expireTime time.Time) bool {
 	shard := s.getShard(key)

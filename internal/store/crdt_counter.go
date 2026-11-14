@@ -1,8 +1,6 @@
 package store
 
 import (
-	"sync/atomic"
-
 	pkgErrors "reservoir/pkg/errors"
 )
 
@@ -151,11 +149,8 @@ func (s *LockFreeStore) storeCounter(shard *LockFreeShard, key string, ctr *pnCo
 		s.accountKeyAdded(shard, newSV.memorySize)
 	}
 
-	if atomic.LoadUint32(&s.recoveryActive) == 0 {
-		if cl, ok := s.commitLog.(CommitLogger); ok && cl != nil {
-			cl.Write("INCRBY", []byte(key), []byte(newValueStr))
-		}
-	}
+	// Log the absolute value; counters keep the TTL, so restate it.
+	s.logStringWrite(shard, "INCRBY", key, newValueStr)
 }
 
 // CounterState returns a snapshot of the key's PN-counter for replication, or

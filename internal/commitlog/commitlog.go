@@ -92,6 +92,23 @@ type Segment struct {
 }
 
 // CommitLog is the main commit log structure
+// nextTimestamp returns a timestamp strictly greater than every one handed out
+// before it. Recovery replays entries sorted by timestamp, so two entries that
+// shared one (a value and the EXPIRE restating its TTL, written back to back)
+// could be replayed in either order.
+func (cl *CommitLog) nextTimestamp() int64 {
+	for {
+		last := atomic.LoadInt64(&cl.lastTimestamp)
+		ts := time.Now().UnixNano()
+		if ts <= last {
+			ts = last + 1
+		}
+		if atomic.CompareAndSwapInt64(&cl.lastTimestamp, last, ts) {
+			return ts
+		}
+	}
+}
+
 type CommitLog struct {
 	// Configuration
 	dataDir        string
@@ -118,6 +135,10 @@ type CommitLog struct {
 	totalBytes     int64
 	compactedBytes int64
 	droppedEntries int64
+
+	// lastTimestamp is the timestamp of the most recently created entry; see
+	// nextTimestamp.
+	lastTimestamp int64
 
 	// Lifecycle
 	mu     sync.RWMutex
@@ -174,7 +195,7 @@ func (cl *CommitLog) Write(operation string, key []byte, value []byte) error {
 
 	entry := &Entry{
 		Type:      EntryTypeWrite,
-		Timestamp: time.Now().UnixNano(),
+		Timestamp: cl.nextTimestamp(),
 		Key:       key,
 		Value:     value,
 		Operation: operation,
@@ -208,7 +229,7 @@ func (cl *CommitLog) Delete(key []byte) {
 
 	entry := &Entry{
 		Type:      EntryTypeDelete,
-		Timestamp: time.Now().UnixNano(),
+		Timestamp: cl.nextTimestamp(),
 		Key:       key,
 		Operation: "DEL",
 	}
