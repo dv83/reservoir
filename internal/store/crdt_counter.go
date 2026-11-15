@@ -130,6 +130,10 @@ func counterFor(storedValue *StoredValue, exists bool, gen hlcStamp) (*pnCounter
 		}
 		ctr := newPNCounter()
 		ctr.gen = gen
+		if storedValue.cold != nil {
+			// Cold values are longer than any integer (minSpillBytes).
+			return nil, pkgErrors.ErrNotInteger
+		}
 		if storedValue.StringVal != "" {
 			base, err := parseIntegerStrict(storedValue.StringVal)
 			if err != nil {

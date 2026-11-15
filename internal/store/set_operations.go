@@ -54,7 +54,7 @@ func (s *LockFreeStore) SAdd(key string, members ...string) (logN int64, logErr 
 		memoryDelta := storedSet.MemoryUsage()
 		newMemory := atomic.LoadInt64(&s.totalMemory) + memoryDelta
 
-		if newMemory > s.limits.MaxMemoryUsage {
+		if s.wouldExceedMemory(shard, memoryDelta) {
 			return 0, pkgErrors.NewMemoryLimit(newMemory, s.limits.MaxMemoryUsage)
 		}
 

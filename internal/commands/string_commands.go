@@ -2,12 +2,14 @@ package commands
 
 import (
 	"bufio"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
 
 	"reservoir/internal/protocol"
 	"reservoir/internal/store"
+	pkgErrors "reservoir/pkg/errors"
 )
 
 // String command handlers for Redis string operations
@@ -26,15 +28,20 @@ func HandleZeroCopyGet(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, wri
 	// absent) and distinguish a wrong-type key (list/set/hash) from a missing
 	// one, returning WRONGTYPE like every other typed command does instead of
 	// silently replying with an empty string.
-	sv, exists := kvStore.GetStoredValue(key)
+	// GetString also reads values tiered storage moved to disk, and fails
+	// rather than serve one that does not match its checksum.
+	value, exists, err := kvStore.GetString(key)
+	if errors.Is(err, pkgErrors.ErrWrongType) {
+		return writeError(writer, "WRONGTYPE Operation against a key holding the wrong kind of value")
+	}
+	if err != nil {
+		return writeError(writer, err.Error())
+	}
 	if !exists {
 		_, err := writer.Write(nullResponse)
 		return err
 	}
-	if sv.Type != store.ValueTypeString {
-		return writeError(writer, "WRONGTYPE Operation against a key holding the wrong kind of value")
-	}
-	return writeBulkString(writer, sv.StringVal)
+	return writeBulkString(writer, value)
 }
 
 // HandleZeroCopySetWithReplication processes SET command - ULTRA OPTIMIZED HOT PATH

@@ -41,7 +41,8 @@ type LockFreeShard struct {
 	// SECOND CACHE LINE: середньо використовувані поля
 	avgKeySize   int64    // 8 bytes - atomic - середній розмір ключа
 	avgValueSize int64    // 8 bytes - atomic - середній розмір значення
-	_            [48]byte // padding до наступної cache line
+	hotReads     int64    // 8 bytes - atomic - in-RAM string reads while tiering is on
+	_            [40]byte // padding до наступної cache line
 
 	// COLD DATA: рідко використовувані поля (expiry operations)
 	expiryMu sync.RWMutex         // 24 bytes
@@ -105,7 +106,9 @@ type LockFreeStore struct {
 	// it is every key's reset point floor (see crdt_reset.go).
 	flushMu    sync.RWMutex
 	flushStamp hlcStamp
-	_          [16]byte // padding до cache line boundary
+	// tier is the tiered-storage state, nil when tiering is off (tier.go).
+	tier *tierState
+	_    [16]byte // padding до cache line boundary
 }
 
 // SetLocalOrigin records this node's origin id so INCR/DECR maintain the PN
@@ -643,17 +646,6 @@ func (s *LockFreeStore) accountMemoryDelta(shard *LockFreeShard, delta int64) {
 	atomic.AddInt64(&s.totalMemory, delta)
 }
 
-// wouldExceedMemory reports whether accepting a write that grows total memory by
-// delta bytes would push it past the configured MaxMemoryUsage. This implements
-// a "noeviction"-style policy: writes that would exceed the limit are rejected.
-// A non-positive delta (overwrite that shrinks, or a delete) is always allowed.
-func (s *LockFreeStore) wouldExceedMemory(delta int64) bool {
-	if s.limits == nil || s.limits.MaxMemoryUsage <= 0 || delta <= 0 {
-		return false
-	}
-	return atomic.LoadInt64(&s.totalMemory)+delta > s.limits.MaxMemoryUsage
-}
-
 // GetMemoryUsage - отримання загального використання пам'яті
 func (s *LockFreeStore) GetMemoryUsage() int64 {
 	return atomic.LoadInt64(&s.totalMemory)
@@ -735,6 +727,9 @@ func (s *LockFreeStore) Stop() {
 	if s.latencyMetrics != nil {
 		s.latencyMetrics.Stop()
 	}
+
+	// Stop value-log collection and close the value files.
+	s.stopTiering()
 }
 
 // GetLatencyMetrics повертає поточні latency метрики
@@ -901,7 +896,7 @@ func (s *LockFreeStore) SetStoredValue(key string, value *StoredValue) error {
 
 	// Check memory limits
 	newMemory := atomic.LoadInt64(&s.totalMemory) + memoryDelta
-	if newMemory > s.limits.MaxMemoryUsage {
+	if s.wouldExceedMemory(shard, memoryDelta) {
 		if !exists(shard.data, key) {
 			atomic.AddInt64(&shard.keyCount, -1)
 			atomic.AddInt64(&s.totalKeys, -1)

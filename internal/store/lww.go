@@ -77,7 +77,7 @@ func (s *LockFreeStore) SetWithHLC(key, value string, stamp hlcStamp) (bool, err
 	} else {
 		memoryDelta = newSV.memorySize
 	}
-	if s.wouldExceedMemory(memoryDelta) {
+	if s.wouldExceedMemory(shard, memoryDelta) {
 		shard.mu.Unlock()
 		return false, pkgErrors.NewMemoryLimit(atomic.LoadInt64(&s.totalMemory)+memoryDelta, s.limits.MaxMemoryUsage)
 	}
@@ -305,8 +305,14 @@ func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
 					Counter: &CounterState{Base: c.Base, P: c.P, N: c.N, GenP: c.gen.TS.Physical, GenL: c.gen.TS.Logical, GenO: c.gen.Origin},
 				})
 			} else {
+				// A cold value is read from the value log for the digest, one
+				// shard at a time, and not cached back into RAM.
+				val, err := s.loadString(shard, k, v)
+				if err != nil {
+					continue
+				}
 				entries = append(entries, LWWShardEntry{
-					Key: k, Value: v.StringVal,
+					Key: k, Value: val,
 					Physical: v.hlc.TS.Physical, Logical: v.hlc.TS.Logical, Origin: v.hlc.Origin,
 				})
 			}

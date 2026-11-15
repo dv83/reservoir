@@ -112,6 +112,9 @@ type KVStore interface {
 
 	// Детальна інформація про ключі (для DEBUG STRUCTURE)
 	GetStoredValue(key string) (*StoredValue, bool)
+	// GetString returns a string key's value, reading it from disk when tiered
+	// storage moved it there; see LockFreeStore.GetString.
+	GetString(key string) (string, bool, error)
 	GetKeysByShards() map[int][]string
 	GetKeyMemoryUsage(key string) int64
 	GetKeyType(key string) ValueType

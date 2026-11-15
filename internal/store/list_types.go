@@ -2,13 +2,15 @@ package store
 
 import (
 	"errors"
+	"reservoir/internal/valuelog"
 	"strconv"
 	"sync"
 	"unsafe"
 )
 
 // ValueType represents the type of a stored value
-type ValueType int
+// ValueType is 4 bytes so that StoredValue packs it with the CLOCK bit.
+type ValueType int32
 
 const (
 	ValueTypeString ValueType = iota
@@ -544,7 +546,10 @@ func (hv *HashValue) IncrByFloat(field string, increment float64) (float64, erro
 
 // StoredValue represents a value that can be stored in the key-value store
 type StoredValue struct {
-	Type       ValueType  `json:"type"`
+	Type ValueType `json:"type"`
+	// touched is the CLOCK reference bit set by reads when tiering is on
+	// (tier.go); it fills the padding after Type.
+	touched    uint32
 	StringVal  string     `json:"string_val,omitempty"`
 	ListVal    *ListValue `json:"list_val,omitempty"`
 	SetVal     *SetValue  `json:"set_val,omitempty"`
@@ -552,6 +557,10 @@ type StoredValue struct {
 	memorySize int64      // cached memory size
 	hlc        hlcStamp   // hybrid logical clock of the last write (for LWW conflict resolution)
 	counter    *pnCounter // PN-counter CRDT state when this string key is used as a counter (cluster mode); nil otherwise
+	// cold, when set, locates this string's value in the value log; StringVal
+	// is then empty (tiered storage, tier.go).
+	cold *valuelog.Ref
+
 	// Per-key access and replication statistics used to live here (about 150
 	// bytes per key); nothing ever updated them, so they were removed to keep
 	// the per-key footprint small (add-tiered-storage, Phase 0).
@@ -956,8 +965,10 @@ func (sv *StoredValue) IsString() bool {
 }
 
 // AsString returns the string value and a boolean indicating success
+// A cold (spilled) value is not in RAM, so it reports false; use the store's
+// GetString to read it.
 func (sv *StoredValue) AsString() (string, bool) {
-	if sv.Type == ValueTypeString {
+	if sv.Type == ValueTypeString && sv.cold == nil {
 		return sv.StringVal, true
 	}
 	return "", false

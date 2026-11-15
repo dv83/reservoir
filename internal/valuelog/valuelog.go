@@ -254,8 +254,11 @@ func (l *Log) Collect(liveRatio float64, relocate Relocator) (int64, error) {
 		}
 	}
 	l.mu.RUnlock()
-	sort.Slice(victims, func(i, j int) bool { return victims[i].id < victims[j].id })
+	return l.collect(victims, relocate)
+}
 
+func (l *Log) collect(victims []*file, relocate Relocator) (int64, error) {
+	sort.Slice(victims, func(i, j int) bool { return victims[i].id < victims[j].id })
 	var reclaimed int64
 	for _, v := range victims {
 		if err := l.scan(v, relocate); err != nil {
@@ -270,6 +273,35 @@ func (l *Log) Collect(liveRatio float64, relocate Relocator) (int64, error) {
 		os.Remove(l.path(v.id))
 	}
 	return reclaimed, nil
+}
+
+// ClosedFileSizes returns the size of every file except the active one.
+func (l *Log) ClosedFileSizes() map[uint32]int64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make(map[uint32]int64, len(l.files))
+	for id, f := range l.files {
+		if f != l.active && f.alive {
+			out[id] = f.size
+		}
+	}
+	return out
+}
+
+// CollectFiles reclaims the given closed files: it hands each record to
+// relocate, then deletes the file. The caller decides which files are worth
+// it (for example from live bytes counted in its own index). It returns the
+// bytes reclaimed.
+func (l *Log) CollectFiles(ids []uint32, relocate Relocator) (int64, error) {
+	l.mu.RLock()
+	var victims []*file
+	for _, id := range ids {
+		if f, ok := l.files[id]; ok && f != l.active && f.alive {
+			victims = append(victims, f)
+		}
+	}
+	l.mu.RUnlock()
+	return l.collect(victims, relocate)
 }
 
 // scan streams every record of f to relocate.

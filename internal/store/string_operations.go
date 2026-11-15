@@ -59,7 +59,7 @@ func (s *LockFreeStore) SetWithOptions(key, value string, opts SetOptions) (bool
 	} else {
 		memoryDelta = storedValue.memorySize
 	}
-	if s.wouldExceedMemory(memoryDelta) {
+	if s.wouldExceedMemory(shard, memoryDelta) {
 		shard.mu.Unlock()
 		return false, pkgErrors.NewMemoryLimit(atomic.LoadInt64(&s.totalMemory)+memoryDelta, s.limits.MaxMemoryUsage)
 	}
@@ -129,7 +129,7 @@ func (s *LockFreeStore) Set(key, value string) error {
 	}
 	// Enforce the memory limit before committing the write (noeviction policy):
 	// reject writes that would push total memory past MaxMemoryUsage.
-	if s.wouldExceedMemory(memoryDelta) {
+	if s.wouldExceedMemory(shard, memoryDelta) {
 		shard.mu.Unlock()
 		return pkgErrors.NewMemoryLimit(atomic.LoadInt64(&s.totalMemory)+memoryDelta, s.limits.MaxMemoryUsage)
 	}
@@ -188,7 +188,50 @@ func (s *LockFreeStore) Get(key string) (string, bool) {
 		return "", false
 	}
 
+	if s.tier != nil {
+		if value.cold != nil {
+			v, found, err := s.GetString(key)
+			return v, found && err == nil
+		}
+		atomic.AddInt64(&shard.hotReads, 1)
+		s.touch(value)
+	}
 	return value.StringVal, true
+}
+
+// GetString returns key's string value, reading it from disk if it is cold. It
+// returns found=false for a missing or expired key, ErrWrongType for a key of
+// another type, and an error if a cold value cannot be read or fails its
+// checksum (tiered storage never serves corrupt data).
+func (s *LockFreeStore) GetString(key string) (string, bool, error) {
+	shard := s.shards[int(FastHash(key)&s.shardMask)]
+	shard.mu.RLock()
+	sv := shard.data[key]
+	if sv == nil || s.isExpiredFast(shard, key) {
+		shard.mu.RUnlock()
+		return "", false, nil
+	}
+	if sv.Type != ValueTypeString {
+		shard.mu.RUnlock()
+		return "", false, pkgErrors.ErrWrongType
+	}
+	if sv.cold == nil {
+		v := sv.StringVal
+		shard.mu.RUnlock()
+		if s.tier != nil {
+			atomic.AddInt64(&shard.hotReads, 1)
+			s.touch(sv)
+		}
+		return v, true, nil
+	}
+	// Read under the shard lock: value-log garbage collection relocates a
+	// record only under this lock, so the file cannot disappear mid-read.
+	v, err := s.loadString(shard, key, sv)
+	shard.mu.RUnlock()
+	if err != nil {
+		return "", false, err
+	}
+	return v, true, nil
 }
 
 // Delete removes a key - OPTIMIZED
@@ -288,7 +331,11 @@ func (s *LockFreeStore) IncrBy(key string, increment int64) (int64, error) {
 		if !storedValue.IsString() {
 			return 0, pkgErrors.ErrWrongType
 		}
-		// Parse existing value
+		// Parse existing value. A cold value is at least minSpillBytes long,
+		// longer than any integer, so it cannot be one.
+		if storedValue.cold != nil {
+			return 0, pkgErrors.ErrNotInteger
+		}
 		if storedValue.StringVal != "" {
 			parsed, err := parseIntegerStrict(storedValue.StringVal)
 			if err != nil {
@@ -365,7 +412,11 @@ func (s *LockFreeStore) Append(key, value string) (int64, error) {
 			return 0, pkgErrors.ErrWrongType
 		}
 		oldMem = storedValue.MemoryUsage()
-		newValue = storedValue.StringVal + value
+		old, err := s.loadString(shard, key, storedValue)
+		if err != nil {
+			return 0, err
+		}
+		newValue = old + value
 	} else {
 		newValue = value
 	}
@@ -409,7 +460,7 @@ func (s *LockFreeStore) StrLen(key string) (int64, error) {
 		return 0, pkgErrors.ErrWrongType
 	}
 
-	return int64(len(storedValue.StringVal)), nil
+	return stringLen(storedValue), nil
 }
 
 // GetSet atomically sets value and returns old value - OPTIMIZED
@@ -428,8 +479,15 @@ func (s *LockFreeStore) GetSet(key, value string) (string, bool, error) {
 	}
 
 	var oldMem int64
+	var oldValue string
 	if existed && oldStoredValue != nil {
 		oldMem = oldStoredValue.MemoryUsage()
+		v, err := s.loadString(shard, key, oldStoredValue)
+		if err != nil {
+			shard.mu.Unlock()
+			return "", false, err
+		}
+		oldValue = v
 	}
 
 	// Direct storage - no complex objects
@@ -449,7 +507,7 @@ func (s *LockFreeStore) GetSet(key, value string) (string, bool, error) {
 
 	if existed && oldStoredValue != nil {
 		s.accountMemoryDelta(shard, newSV.memorySize-oldMem)
-		return oldStoredValue.StringVal, true, nil
+		return oldValue, true, nil
 	}
 	s.accountKeyAdded(shard, newSV.memorySize)
 	return "", false, nil
