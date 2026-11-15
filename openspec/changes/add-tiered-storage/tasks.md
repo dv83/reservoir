@@ -16,7 +16,7 @@
 ## 3. Phase 1: values on disk for strings
 
 - [x] 3.1 Stamp commit-log entries in the writer so file order is replay order, and stream recovery instead of sorting the log in memory (sorted fallback for older logs)
-- [ ] 3.2 Add the value log: CRC-checked records, positioned reads, file rotation and garbage collection of dead records
+- [x] 3.2 Add the value log: CRC-checked records, positioned reads, file rotation and garbage collection of dead records
 - [ ] 3.3 Cold string values in the store: tier-transparent reads that fail on a checksum error, and a CLOCK reference bit for victim selection
 - [ ] 3.4 Spill values at the RAM budget instead of rejecting writes, and reject new keys once the key index alone exceeds the budget
 - [ ] 3.5 Restart: recovery replays the log and spills at the budget again; value files from before the restart are discarded; tiering requires the commit log
