@@ -4,7 +4,6 @@ import (
 	"errors"
 	"strconv"
 	"sync"
-	"time"
 	"unsafe"
 )
 
@@ -550,22 +549,12 @@ type StoredValue struct {
 	ListVal    *ListValue `json:"list_val,omitempty"`
 	SetVal     *SetValue  `json:"set_val,omitempty"`
 	HashVal    *HashValue `json:"hash_val,omitempty"`
-	WriteCount int64      `json:"write_count"`
-	ReadCount  int64      `json:"read_count"`
-	LastWrite  time.Time  `json:"last_write"`
-	LastRead   time.Time  `json:"last_read"`
 	memorySize int64      // cached memory size
 	hlc        hlcStamp   // hybrid logical clock of the last write (for LWW conflict resolution)
 	counter    *pnCounter // PN-counter CRDT state when this string key is used as a counter (cluster mode); nil otherwise
-
-	// Replication tracking fields (simplified implementation)
-	Replicated          bool      `json:"replicated,omitempty"`
-	LastReplication     time.Time `json:"last_replication,omitempty"`
-	ReplicatedToNodes   []string  `json:"replicated_to_nodes,omitempty"`
-	ReplicationAttempts int       `json:"replication_attempts,omitempty"`
-
-	// Legacy compatibility field
-	Data interface{} `json:"data,omitempty"`
+	// Per-key access and replication statistics used to live here (about 150
+	// bytes per key); nothing ever updated them, so they were removed to keep
+	// the per-key footprint small (add-tiered-storage, Phase 0).
 }
 
 // Release is a no-op method for compatibility with object pools
@@ -870,37 +859,12 @@ func (lv *ListValue) Trim(start, stop int64) {
 	lv.deque.Trim(int(start), int(stop))
 }
 
-// Reset clears the stored value and resets statistics
+// Reset clears the stored value
 func (sv *StoredValue) Reset() {
 	sv.StringVal = ""
 	sv.ListVal = nil
 	sv.SetVal = nil
 	sv.HashVal = nil
-	sv.WriteCount = 0
-	sv.ReadCount = 0
-	sv.LastWrite = time.Time{}
-	sv.LastRead = time.Time{}
-}
-
-// TrackRead increments read count and updates last read time
-func (sv *StoredValue) TrackRead() {
-	sv.ReadCount++
-	sv.LastRead = time.Now()
-}
-
-// TrackWrite increments write count and updates last write time
-func (sv *StoredValue) TrackWrite() {
-	sv.WriteCount++
-	sv.LastWrite = time.Now()
-}
-
-// TrackReplication tracks replication information (no-op for simple implementation)
-func (sv *StoredValue) TrackReplication(nodes ...string) {
-	// No-op: we don't track replication details in simple implementation
-	sv.Replicated = true
-	sv.LastReplication = time.Now()
-	sv.ReplicatedToNodes = nodes
-	sv.ReplicationAttempts++
 }
 
 // MemoryUsage returns the estimated memory usage of the stored value.
@@ -943,40 +907,6 @@ func (sv *StoredValue) MemoryUsage() int64 {
 
 	sv.memorySize = size
 	return size
-}
-
-// GetDetailedStats returns detailed statistics about the stored value
-func (sv *StoredValue) GetDetailedStats() map[string]interface{} {
-	stats := map[string]interface{}{
-		"type":        sv.Type.String(),
-		"read_count":  sv.ReadCount,
-		"write_count": sv.WriteCount,
-		"last_read":   sv.LastRead,
-		"last_write":  sv.LastWrite,
-		"memory_size": sv.MemoryUsage(),
-	}
-
-	switch sv.Type {
-	case ValueTypeString:
-		stats["string_length"] = len(sv.StringVal)
-	case ValueTypeList:
-		if sv.ListVal != nil {
-			stats["list_length"] = sv.ListVal.LLen()
-		}
-	case ValueTypeSet:
-		if sv.SetVal != nil {
-			setStats := sv.SetVal.Stats()
-			for k, v := range setStats {
-				stats["set_"+k] = v
-			}
-		}
-	case ValueTypeHash:
-		if sv.HashVal != nil {
-			stats["hash_field_count"] = len(sv.HashVal.Fields)
-		}
-	}
-
-	return stats
 }
 
 // Type checking methods

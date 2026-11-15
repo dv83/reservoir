@@ -137,7 +137,7 @@ func BenchmarkTypeCheckSwitch(b *testing.B) {
 		switch v := value.(type) {
 		case *StoredValue:
 			if v.Type == StringType {
-				_ = v.Data.(string)
+				_ = v.StringVal
 			}
 		case string:
 			_ = v

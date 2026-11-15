@@ -69,15 +69,6 @@ func getAllKeysStructureInfo(kvStore store.KVStore) string {
 			keyType := kvStore.GetKeyType(key)
 			keyMemory := kvStore.GetKeyMemoryUsage(key)
 
-			// Get stored value for access stats
-			storedValue, exists := kvStore.GetStoredValue(key)
-			var accessInfo string
-			if exists {
-				accessInfo = fmt.Sprintf("accessed: %d times", storedValue.ReadCount+storedValue.WriteCount)
-			} else {
-				accessInfo = "accessed: 0 times"
-			}
-
 			// Format type-specific info
 			var typeInfo string
 			switch keyType {
@@ -99,8 +90,8 @@ func getAllKeysStructureInfo(kvStore store.KVStore) string {
 				typeInfo = "Unknown"
 			}
 
-			builder.WriteString(fmt.Sprintf("  - %s (%s, %d bytes, %s)\r\n",
-				key, typeInfo, keyMemory, accessInfo))
+			builder.WriteString(fmt.Sprintf("  - %s (%s, %d bytes)\r\n",
+				key, typeInfo, keyMemory))
 		}
 		builder.WriteString("\r\n")
 	}
@@ -141,36 +132,6 @@ func getKeyStructureInfo(kvStore store.KVStore, key string) string {
 		}
 	} else {
 		builder.WriteString("TTL: Not set\r\n")
-	}
-
-	// Add access statistics
-	builder.WriteString("\r\nAccess Statistics:\r\n")
-	builder.WriteString(fmt.Sprintf("  - Read count: %d\r\n", storedValue.ReadCount))
-	builder.WriteString(fmt.Sprintf("  - Write count: %d\r\n", storedValue.WriteCount))
-	if !storedValue.LastRead.IsZero() {
-		builder.WriteString(fmt.Sprintf("  - Last read: %s\r\n", storedValue.LastRead.Format("2006-01-02 15:04:05")))
-	} else {
-		builder.WriteString("  - Last read: Never\r\n")
-	}
-	if !storedValue.LastWrite.IsZero() {
-		builder.WriteString(fmt.Sprintf("  - Last write: %s\r\n", storedValue.LastWrite.Format("2006-01-02 15:04:05")))
-	} else {
-		builder.WriteString("  - Last write: Never\r\n")
-	}
-
-	// Add replication information
-	builder.WriteString("\r\nReplication Info:\r\n")
-	if storedValue.Replicated {
-		builder.WriteString("  - Replicated: Yes\r\n")
-		if !storedValue.LastReplication.IsZero() {
-			builder.WriteString(fmt.Sprintf("  - Last replication: %s\r\n", storedValue.LastReplication.Format("2006-01-02 15:04:05")))
-		}
-		if len(storedValue.ReplicatedToNodes) > 0 {
-			builder.WriteString(fmt.Sprintf("  - Replicated to nodes: %v\r\n", storedValue.ReplicatedToNodes))
-		}
-		builder.WriteString(fmt.Sprintf("  - Replication attempts: %d\r\n", storedValue.ReplicationAttempts))
-	} else {
-		builder.WriteString("  - Replicated: No\r\n")
 	}
 
 	// Type-specific information

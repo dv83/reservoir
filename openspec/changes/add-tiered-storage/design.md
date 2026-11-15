@@ -96,3 +96,24 @@ is a natural extension.
   compaction loss into permanent data loss. Phase 0 is mandatory.
 - Large containers stay in RAM in Phase 1, so a few huge sets or lists can still
   exhaust memory.
+
+## Phase 0 measurements
+
+Measured with `RESERVOIR_MEMBENCH=1 go test ./internal/store/ -run TestMemoryFootprintPerKey -v`
+(1M string keys, 16-byte keys and values, heap growth per key; standalone and
+cluster write paths give the same figures).
+
+| | `StoredValue` | heap per key | keys per GB |
+|---|---|---|---|
+| Baseline | 232 bytes | 314 bytes | 3.4M |
+| Statistics, replication-tracking and legacy fields removed | 88 bytes | 170 bytes | 6.3M |
+
+The removed fields (read/write counts and times, replication flags, node list,
+attempt count, a legacy `Data` interface) were never updated by any code path;
+the debug command that printed them always showed zeros.
+
+Of the remaining 170 bytes, about 96 are the `StoredValue` allocation (88 bytes
+rounded to its size class), 32 the key and value bytes, and about 40 the map
+entry. Further gains need structural changes (values stored inline in the shard
+map, or one container pointer instead of three) and are left for Phase 1, where
+the key index replaces this layout for cold keys anyway.

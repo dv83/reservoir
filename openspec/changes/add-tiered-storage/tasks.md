@@ -2,16 +2,16 @@
 
 ## 1. Phase 0: measure and slim the per-key footprint
 
-- [ ] 1.1 Benchmark bytes per key for 1M string keys and record the baseline
-- [ ] 1.2 Move statistics, replication-tracking and legacy fields out of StoredValue
-- [ ] 1.3 Re-measure bytes per key and keys per GB
+- [x] 1.1 Benchmark bytes per key for 1M string keys and record the baseline
+- [x] 1.2 Move statistics, replication-tracking and legacy fields out of StoredValue
+- [x] 1.3 Re-measure bytes per key and keys per GB
 
 ## 2. Phase 0: make the log a safe value store
 
-- [ ] 2.1 Complete fix-compaction-state-loss
+- [x] 2.1 Complete fix-compaction-state-loss
 - [ ] 2.2 Replace dropping on a full write channel with backpressure, and test that no acknowledged write is lost
 - [ ] 2.3 Make compaction a streaming merge with bounded memory
-- [ ] 2.4 Persist lists, and sets and hashes on standalone nodes
+- [x] 2.4 Persist lists, and sets and hashes on standalone nodes
 
 ## 3. Phase 1: values on disk for strings
 
