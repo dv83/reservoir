@@ -26,3 +26,4 @@
 
 - [ ] 5.1 Benchmark many small keys (RSS, ops/s, p99) against memory mode and record the results
 - [ ] 5.2 Cut the per-write cost: commit outside the shard lock with ordered group commit, and avoid the full existence read for new keys
+- [ ] 5.3 Store large sets and hashes as one record per element, so a write to a large container is not O(size) (today each SADD to a 200K-member set re-encodes the whole set)

@@ -320,16 +320,16 @@ func decodeSet(d *decoder, hasCRDT bool) *SetValue {
 	s := NewSetValue()
 	n := d.count()
 	for i := 0; i < n && d.err == nil; i++ {
-		s.Elements[d.str()] = struct{}{}
+		s.putElem(d.str())
 	}
 	s.totalSize = int64(len(s.Elements))
 	if hasCRDT {
 		s.crdt = newLWWSet()
-		for _, side := range []map[string]hlcStamp{s.crdt.adds, s.crdt.removes} {
+		for _, put := range []func(string, hlcStamp){s.crdt.putAdd, s.crdt.putRemove} {
 			n := d.count()
 			for i := 0; i < n && d.err == nil; i++ {
 				m := d.str()
-				side[m] = d.stamp()
+				put(m, d.stamp())
 			}
 		}
 	}
@@ -341,7 +341,7 @@ func decodeHash(d *decoder, hasCRDT bool) *HashValue {
 	n := d.count()
 	for i := 0; i < n && d.err == nil; i++ {
 		f := d.str()
-		h.Fields[f] = d.str()
+		h.putField(f, d.str())
 	}
 	if hasCRDT {
 		h.crdt = newLWWHash()
@@ -354,7 +354,7 @@ func decodeHash(d *decoder, hasCRDT bool) *HashValue {
 			} else {
 				fl.value = d.str()
 			}
-			h.crdt.fields[f] = fl
+			h.crdt.putField(f, fl)
 		}
 	}
 	return h

@@ -16,6 +16,7 @@ import (
 // coordinator.
 type lwwHash struct {
 	fields map[string]hashField
+	bytes  int64 // sum of field + value length + stamp size
 }
 
 // hashField is one field's winning write: its stamp, the value (when it is a
@@ -34,7 +35,7 @@ func newLWWHash() *lwwHash {
 // newer than the field's current stamp. Returns whether it was applied.
 func (h *lwwHash) set(field, value string, st hlcStamp) bool {
 	if cur, ok := h.fields[field]; !ok || st.After(cur.stamp) {
-		h.fields[field] = hashField{stamp: st, value: value}
+		h.putField(field, hashField{stamp: st, value: value})
 		return true
 	}
 	return false
@@ -46,7 +47,7 @@ func (h *lwwHash) set(field, value string, st hlcStamp) bool {
 // Returns whether it was applied.
 func (h *lwwHash) del(field string, st hlcStamp) bool {
 	if cur, ok := h.fields[field]; !ok || st.After(cur.stamp) {
-		h.fields[field] = hashField{stamp: st, deleted: true}
+		h.putField(field, hashField{stamp: st, deleted: true})
 		return true
 	}
 	return false
@@ -72,7 +73,7 @@ func (hv *HashValue) ensureCRDT() {
 	}
 	hv.crdt = newLWWHash()
 	for field, value := range hv.Fields {
-		hv.crdt.fields[field] = hashField{value: value}
+		hv.crdt.putField(field, hashField{value: value})
 	}
 }
 
@@ -82,10 +83,10 @@ func (hv *HashValue) ensureCRDT() {
 func (hv *HashValue) syncField(field string) (was, is bool) {
 	_, was = hv.Fields[field]
 	if val, ok := hv.crdt.get(field); ok {
-		hv.Fields[field] = val
+		hv.putField(field, val)
 		return was, true
 	}
-	delete(hv.Fields, field)
+	hv.dropField(field)
 	return was, false
 }
 
@@ -160,7 +161,7 @@ func (hv *HashValue) gcFieldTombstones(cutoffNanos int64) (pruned int, empty boo
 			continue // live field
 		}
 		if hf.stamp.TS.Physical < cutoffNanos {
-			delete(hv.crdt.fields, f)
+			hv.crdt.dropField(f)
 			pruned++
 		}
 	}

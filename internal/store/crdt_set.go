@@ -17,6 +17,7 @@ import (
 type lwwSet struct {
 	adds    map[string]hlcStamp
 	removes map[string]hlcStamp
+	bytes   int64 // sum over adds and removes of element length + stamp size
 }
 
 func newLWWSet() *lwwSet {
@@ -30,14 +31,14 @@ func newLWWSet() *lwwSet {
 // Returns whether elem became (or stayed) a member as a result.
 func (s *lwwSet) add(elem string, st hlcStamp) {
 	if cur, ok := s.adds[elem]; !ok || st.After(cur) {
-		s.adds[elem] = st
+		s.putAdd(elem, st)
 	}
 }
 
 // remove records a remove of elem at stamp st, keeping only the newest remove.
 func (s *lwwSet) remove(elem string, st hlcStamp) {
 	if cur, ok := s.removes[elem]; !ok || st.After(cur) {
-		s.removes[elem] = st
+		s.putRemove(elem, st)
 	}
 }
 
@@ -87,7 +88,7 @@ func (sv *SetValue) ensureCRDT() {
 	}
 	sv.crdt = newLWWSet()
 	for elem := range sv.Elements {
-		sv.crdt.adds[elem] = hlcStamp{}
+		sv.crdt.putAdd(elem, hlcStamp{})
 	}
 }
 
@@ -99,11 +100,11 @@ func (sv *SetValue) syncMember(elem string) bool {
 	want := sv.crdt.contains(elem)
 	switch {
 	case want && !present:
-		sv.Elements[elem] = struct{}{}
+		sv.putElem(elem)
 		sv.totalSize++
 		return true
 	case !want && present:
-		delete(sv.Elements, elem)
+		sv.dropElem(elem)
 		sv.totalSize--
 		return true
 	}
@@ -189,8 +190,8 @@ func (sv *SetValue) gcElementTombstones(cutoffNanos int64) (pruned int, empty bo
 			continue // add wins; element is live
 		}
 		if rst.TS.Physical < cutoffNanos {
-			delete(sv.crdt.removes, elem)
-			delete(sv.crdt.adds, elem)
+			sv.crdt.dropRemove(elem)
+			sv.crdt.dropAdd(elem)
 			pruned++
 		}
 	}

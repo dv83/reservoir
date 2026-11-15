@@ -82,6 +82,7 @@ type SetValue struct {
 	mu       sync.RWMutex        // For concurrent access safety
 
 	totalSize int64 // Total number of elements
+	bytes     int64 // sum of member lengths (see container_bytes.go)
 
 	// crdt holds per-element last-write-wins stamps for cluster convergence. It
 	// is nil for sets only ever touched by the plain (non-cluster) Add/Remove
@@ -114,8 +115,7 @@ func (sv *SetValue) Add(elements ...string) int64 {
 
 	added := int64(0)
 	for _, element := range elements {
-		if _, exists := sv.Elements[element]; !exists {
-			sv.Elements[element] = struct{}{}
+		if sv.putElem(element) {
 			added++
 			sv.totalSize++
 		}
@@ -132,8 +132,7 @@ func (sv *SetValue) Remove(elements ...string) int64 {
 
 	removed := int64(0)
 	for _, element := range elements {
-		if _, exists := sv.Elements[element]; exists {
-			delete(sv.Elements, element)
+		if sv.dropElem(element) {
 			removed++
 			sv.totalSize--
 		}
@@ -183,7 +182,7 @@ func (sv *SetValue) Pop() (string, bool) {
 
 	// Get first element (random enough for simple implementation)
 	for element := range sv.Elements {
-		delete(sv.Elements, element)
+		sv.dropElem(element)
 		sv.totalSize--
 		return element, true
 	}
@@ -273,23 +272,12 @@ func (sv *SetValue) MemoryUsage() int64 {
 	sv.mu.RLock()
 	defer sv.mu.RUnlock()
 
-	size := int64(unsafe.Sizeof(*sv))
-	for element := range sv.Elements {
-		size += int64(len(element))
-	}
-
+	size := int64(unsafe.Sizeof(*sv)) + sv.bytes
 	// Element stamps roughly double per-element storage when the CRDT is active
 	// (an add stamp, plus a remove stamp for tombstoned elements).
 	if sv.crdt != nil {
-		stampSize := int64(unsafe.Sizeof(hlcStamp{}))
-		for element := range sv.crdt.adds {
-			size += int64(len(element)) + stampSize
-		}
-		for element := range sv.crdt.removes {
-			size += int64(len(element)) + stampSize
-		}
+		size += sv.crdt.bytes
 	}
-
 	return size
 }
 
@@ -314,6 +302,7 @@ func (sv *SetValue) Copy() *SetValue {
 	copySet := &SetValue{
 		Elements:  make(map[string]struct{}, len(sv.Elements)),
 		totalSize: sv.totalSize,
+		bytes:     sv.bytes,
 	}
 
 	for elem := range sv.Elements {
@@ -327,6 +316,7 @@ func (sv *SetValue) Copy() *SetValue {
 type HashValue struct {
 	Fields map[string]string // field-value pairs
 	mu     sync.RWMutex      // For concurrent access safety
+	bytes  int64             // sum of field and value lengths (see container_bytes.go)
 
 	// crdt holds per-field last-write-wins stamps for cluster convergence. It is
 	// nil for hashes only ever touched by the plain (non-cluster) path, and is
@@ -347,9 +337,7 @@ func (hv *HashValue) Set(field, value string) bool {
 	hv.mu.Lock()
 	defer hv.mu.Unlock()
 
-	_, existed := hv.Fields[field]
-	hv.Fields[field] = value
-	return !existed // return true if field was new
+	return hv.putField(field, value) // true if field was new
 }
 
 // SetMultiple sets multiple field-value pairs in the hash
@@ -367,10 +355,9 @@ func (hv *HashValue) SetMultiple(fieldValues ...string) (int64, error) {
 		field := fieldValues[i]
 		value := fieldValues[i+1]
 
-		if _, existed := hv.Fields[field]; !existed {
+		if hv.putField(field, value) {
 			added++
 		}
-		hv.Fields[field] = value
 	}
 
 	return added, nil
@@ -392,8 +379,7 @@ func (hv *HashValue) Del(fields ...string) int64 {
 
 	deleted := int64(0)
 	for _, field := range fields {
-		if _, exists := hv.Fields[field]; exists {
-			delete(hv.Fields, field)
+		if hv.dropField(field) {
 			deleted++
 		}
 	}
@@ -483,20 +469,12 @@ func (hv *HashValue) MemoryUsage() int64 {
 	hv.mu.RLock()
 	defer hv.mu.RUnlock()
 
-	size := int64(unsafe.Sizeof(*hv))
-	for field, value := range hv.Fields {
-		size += int64(len(field) + len(value))
-	}
-
+	size := int64(unsafe.Sizeof(*hv)) + hv.bytes
 	// Field stamps (and any tombstoned fields) add per-field overhead when the
 	// CRDT is active.
 	if hv.crdt != nil {
-		stampSize := int64(unsafe.Sizeof(hlcStamp{}))
-		for field, f := range hv.crdt.fields {
-			size += int64(len(field)+len(f.value)) + stampSize
-		}
+		size += hv.crdt.bytes
 	}
-
 	return size
 }
 
@@ -517,7 +495,7 @@ func (hv *HashValue) IncrBy(field string, increment int64) (int64, error) {
 	}
 
 	newValue := current + increment
-	hv.Fields[field] = strconv.FormatInt(newValue, 10)
+	hv.putField(field, strconv.FormatInt(newValue, 10))
 
 	return newValue, nil
 }
@@ -539,7 +517,7 @@ func (hv *HashValue) IncrByFloat(field string, increment float64) (float64, erro
 	}
 
 	newValue := current + increment
-	hv.Fields[field] = strconv.FormatFloat(newValue, 'f', -1, 64)
+	hv.putField(field, strconv.FormatFloat(newValue, 'f', -1, 64))
 
 	return newValue, nil
 }

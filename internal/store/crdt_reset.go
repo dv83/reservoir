@@ -157,19 +157,18 @@ func (sv *SetValue) pruneUpTo(r hlcStamp) (empty bool) {
 	}
 	for e, st := range sv.crdt.adds {
 		if !st.After(r) {
-			delete(sv.crdt.adds, e)
+			sv.crdt.dropAdd(e)
 		}
 	}
 	for e, st := range sv.crdt.removes {
 		if !st.After(r) {
-			delete(sv.crdt.removes, e)
+			sv.crdt.dropRemove(e)
 		}
 	}
-	sv.Elements = make(map[string]struct{}, len(sv.crdt.adds))
-	sv.totalSize = 0
+	sv.resetElems(len(sv.crdt.adds))
 	for e := range sv.crdt.adds {
 		if sv.crdt.contains(e) {
-			sv.Elements[e] = struct{}{}
+			sv.putElem(e)
 			sv.totalSize++
 		}
 	}
@@ -186,13 +185,13 @@ func (hv *HashValue) pruneUpTo(r hlcStamp) (empty bool) {
 	}
 	for f, fld := range hv.crdt.fields {
 		if !fld.stamp.After(r) {
-			delete(hv.crdt.fields, f)
+			hv.crdt.dropField(f)
 		}
 	}
-	hv.Fields = make(map[string]string, len(hv.crdt.fields))
+	hv.resetFields(len(hv.crdt.fields))
 	for f := range hv.crdt.fields {
 		if v, ok := hv.crdt.get(f); ok {
-			hv.Fields[f] = v
+			hv.putField(f, v)
 		}
 	}
 	return len(hv.crdt.fields) == 0
