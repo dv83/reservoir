@@ -198,7 +198,7 @@ func (s *LockFreeStore) HSetLWW(key string, physical int64, logical uint32, orig
 		return 0, nil
 	}
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	var hashValue *HashValue
 	existed := false
 	if ok {
@@ -247,7 +247,7 @@ func (s *LockFreeStore) HDelLWW(key string, physical int64, logical uint32, orig
 		return 0, nil
 	}
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	var hashValue *HashValue
 	existed := false
 	if ok {
@@ -280,7 +280,7 @@ func (s *LockFreeStore) storeHash(shard *LockFreeShard, key string, old *StoredV
 		storedHash := NewStoredHash()
 		storedHash.HashVal = hashValue
 		memoryDelta := storedHash.MemoryUsage()
-		shard.data[key] = storedHash
+		shard.put(key, storedHash)
 		atomic.AddInt64(&shard.keyCount, 1)
 		atomic.AddInt64(&s.totalKeys, 1)
 		atomic.AddInt64(&shard.memoryUsage, memoryDelta)

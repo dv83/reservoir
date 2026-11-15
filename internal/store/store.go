@@ -246,10 +246,10 @@ func (s *LockFreeStore) DeleteFast(key string) bool {
 
 	// Deletion з RWMutex
 	shard.mu.Lock()
-	oldValue, existed := shard.data[key]
+	oldValue, existed := shard.get(key)
 	if existed {
 		recordExpiryTombstone(shard, key, oldValue, time.Time{})
-		delete(shard.data, key)
+		shard.del(key)
 	}
 	shard.mu.Unlock()
 	if !existed {
@@ -425,10 +425,10 @@ func (s *LockFreeStore) deleteExpiredAsync(shard *LockFreeShard, key string) {
 	// Direct fallback if batch processor not available (should not happen)
 	// Emergency fallback - process immediately
 	shard.mu.Lock()
-	oldValue, existed := shard.data[key]
+	oldValue, existed := shard.get(key)
 	if existed {
 		recordExpiryTombstone(shard, key, oldValue, time.Time{})
-		delete(shard.data, key)
+		shard.del(key)
 	}
 	shard.mu.Unlock()
 	if existed {
@@ -560,7 +560,7 @@ func (s *LockFreeStore) SetExpiry(key string, expireTime time.Time) bool {
 
 	// Check if key exists in the store
 	shard.mu.RLock()
-	_, exists := shard.data[key]
+	_, exists := shard.get(key)
 	shard.mu.RUnlock()
 
 	if exists {
@@ -884,7 +884,7 @@ func (s *LockFreeStore) SetStoredValue(key string, value *StoredValue) error {
 	// Calculate memory change
 	var memoryDelta int64
 
-	if existingValue, exists := shard.data[key]; exists {
+	if existingValue, exists := shard.get(key); exists {
 		// Key exists, calculate the difference
 		memoryDelta = value.MemoryUsage() - existingValue.MemoryUsage()
 	} else {
@@ -905,7 +905,7 @@ func (s *LockFreeStore) SetStoredValue(key string, value *StoredValue) error {
 	}
 
 	// Store the value
-	shard.data[key] = value
+	shard.put(key, value)
 
 	// Update memory usage
 	atomic.AddInt64(&shard.memoryUsage, memoryDelta)
@@ -946,7 +946,7 @@ func (sd *LockFreeShardDebug) GetStoredValueForDebug(key string) *StoredValue {
 	sd.shard.mu.RLock()
 	defer sd.shard.mu.RUnlock()
 
-	return sd.shard.data[key]
+	return sd.shard.getV(key)
 }
 
 // GetStoredValue returns the StoredValue for a key (for DEBUG STRUCTURE)
@@ -958,7 +958,7 @@ func (s *LockFreeStore) GetStoredValue(key string) (*StoredValue, bool) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, exists := shard.data[key]
+	storedValue, exists := shard.get(key)
 	if !exists {
 		return nil, false
 	}

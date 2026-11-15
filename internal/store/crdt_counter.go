@@ -164,7 +164,7 @@ func (s *LockFreeStore) storeCounter(shard *LockFreeShard, key string, ctr *pnCo
 		counter:    ctr,
 		memorySize: int64(len(key)+len(newValueStr)) + ctr.memoryEstimate(),
 	}
-	shard.data[key] = newSV
+	shard.put(key, newSV)
 
 	if exists {
 		s.accountMemoryDelta(shard, newSV.memorySize-oldMem)
@@ -182,7 +182,7 @@ func (s *LockFreeStore) CounterState(key string) (CounterState, bool) {
 	shard := s.getShard(key)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
-	v, ok := shard.data[key]
+	v, ok := shard.get(key)
 	if !ok || v == nil || v.counter == nil {
 		return CounterState{}, false
 	}
@@ -202,7 +202,7 @@ func (s *LockFreeStore) MergeCounter(key string, st CounterState) (int64, error)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedValue, exists := shard.data[key]
+	storedValue, exists := shard.get(key)
 	in := st.gen()
 	r := s.resetPoint(shard, key)
 	current := func() int64 {

@@ -224,7 +224,7 @@ func (s *LockFreeStore) SAddLWW(key string, physical int64, logical uint32, orig
 		return 0, nil
 	}
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	var setValue *SetValue
 	existed := false
 	if ok {
@@ -251,7 +251,7 @@ func (s *LockFreeStore) SAddLWW(key string, physical int64, logical uint32, orig
 		if s.wouldExceedMemory(shard, memoryDelta) {
 			return 0, pkgErrors.NewMemoryLimit(atomic.LoadInt64(&s.totalMemory)+memoryDelta, s.limits.MaxMemoryUsage)
 		}
-		shard.data[key] = storedSet
+		shard.put(key, storedSet)
 		atomic.AddInt64(&shard.keyCount, 1)
 		atomic.AddInt64(&s.totalKeys, 1)
 		atomic.AddInt64(&shard.memoryUsage, memoryDelta)
@@ -293,7 +293,7 @@ func (s *LockFreeStore) SRemLWW(key string, physical int64, logical uint32, orig
 		return 0, nil
 	}
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	var setValue *SetValue
 	existed := false
 	if ok {
@@ -320,7 +320,7 @@ func (s *LockFreeStore) SRemLWW(key string, physical int64, logical uint32, orig
 		if s.wouldExceedMemory(shard, memoryDelta) {
 			return 0, pkgErrors.NewMemoryLimit(atomic.LoadInt64(&s.totalMemory)+memoryDelta, s.limits.MaxMemoryUsage)
 		}
-		shard.data[key] = storedSet
+		shard.put(key, storedSet)
 		atomic.AddInt64(&shard.keyCount, 1)
 		atomic.AddInt64(&s.totalKeys, 1)
 		atomic.AddInt64(&shard.memoryUsage, memoryDelta)

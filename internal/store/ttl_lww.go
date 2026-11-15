@@ -24,7 +24,7 @@ func (s *LockFreeStore) ExpireLWW(key string, deadline int64, physical int64, lo
 	if rec, ok := shard.ttlRecs[key]; ok && !stamp.After(rec.stamp) {
 		return false // a newer TTL op already won
 	}
-	v, present := shard.data[key]
+	v, present := shard.get(key)
 	if present && v != nil && !v.hlc.TS.IsZero() && !stamp.After(v.hlc) {
 		return false // the current value was written after this TTL op
 	}

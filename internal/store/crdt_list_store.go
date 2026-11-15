@@ -114,7 +114,7 @@ func (list *ListValue) rematerialize(changed []rgaElem) {
 // getListForWrite loads or creates the list at key for a CRDT write. Returns the
 // list, its stored value (nil if new), and whether it already existed.
 func (s *LockFreeStore) getListForWrite(shard *LockFreeShard, key string) (*ListValue, *StoredValue, bool, error) {
-	if sv, ok := shard.data[key]; ok {
+	if sv, ok := shard.get(key); ok {
 		if sv.Type != ValueTypeList {
 			return nil, nil, false, pkgErrors.ErrWrongType
 		}
@@ -131,7 +131,7 @@ func (s *LockFreeStore) commitListWrite(shard *LockFreeShard, key string, list *
 	if !existed {
 		newSV := newStoredList(list)
 		mem := newSV.MemoryUsage()
-		shard.data[key] = newSV
+		shard.put(key, newSV)
 		s.accountKeyAdded(shard, mem)
 		return
 	}
@@ -183,7 +183,7 @@ func (s *LockFreeStore) pushXCRDT(key string, prepend bool, elements ...string) 
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	sv, ok := shard.data[key]
+	sv, ok := shard.get(key)
 	if !ok {
 		return 0, nil
 	}
@@ -261,7 +261,7 @@ func (s *LockFreeStore) popCRDT(key string, count int, fromHead bool) ([]string,
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	sv, ok := shard.data[key]
+	sv, ok := shard.get(key)
 	if !ok {
 		return nil, nil
 	}
@@ -305,7 +305,7 @@ func (s *LockFreeStore) lsetCRDT(key string, index int64, element string) error 
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	sv, ok := shard.data[key]
+	sv, ok := shard.get(key)
 	if !ok {
 		return fmt.Errorf("no such key")
 	}
@@ -339,7 +339,7 @@ func (s *LockFreeStore) lremCRDT(key string, count int64, element string) (int64
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	sv, ok := shard.data[key]
+	sv, ok := shard.get(key)
 	if !ok {
 		return 0, nil
 	}
@@ -399,7 +399,7 @@ func (s *LockFreeStore) ltrimCRDT(key string, start, stop int64) error {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	sv, ok := shard.data[key]
+	sv, ok := shard.get(key)
 	if !ok {
 		return nil
 	}
@@ -453,7 +453,7 @@ func (s *LockFreeStore) ltrimCRDT(key string, start, stop int64) error {
 func (s *LockFreeStore) finishListDelete(shard *LockFreeShard, key string, list *ListValue, sv *StoredValue, r *rgaList) {
 	if r.length() == 0 && len(r.elems) == 0 {
 		freed := sv.MemoryUsage()
-		delete(shard.data, key)
+		shard.del(key)
 		atomic.AddInt64(&shard.keyCount, -1)
 		atomic.AddInt64(&s.totalKeys, -1)
 		atomic.AddInt64(&shard.memoryUsage, -freed)
@@ -518,7 +518,7 @@ func (s *LockFreeStore) DrainListDelta(key string) (ListDelta, bool) {
 	shard := s.getShard(key)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
-	sv, ok := shard.data[key]
+	sv, ok := shard.get(key)
 	if !ok || sv.Type != ValueTypeList || sv.ListVal == nil || len(sv.ListVal.pending) == 0 {
 		return ListDelta{}, false
 	}
@@ -541,7 +541,7 @@ func (s *LockFreeStore) ApplyListDelta(key string, delta ListDelta) error {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	sv, existed := shard.data[key]
+	sv, existed := shard.get(key)
 	in := delta.gen()
 	// A delta from before the key's last reset belongs to a deleted incarnation.
 	if s.resetPoint(shard, key).After(in) {
@@ -594,7 +594,7 @@ func (s *LockFreeStore) ApplyListDelta(key string, delta ListDelta) error {
 	if r.length() == 0 && len(r.elems) == 0 {
 		if existed {
 			freed := sv.MemoryUsage()
-			delete(shard.data, key)
+			shard.del(key)
 			atomic.AddInt64(&shard.keyCount, -1)
 			atomic.AddInt64(&s.totalKeys, -1)
 			atomic.AddInt64(&shard.memoryUsage, -freed)

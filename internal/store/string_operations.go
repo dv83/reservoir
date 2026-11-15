@@ -45,7 +45,7 @@ func (s *LockFreeStore) SetWithOptions(key, value string, opts SetOptions) (bool
 
 	var memoryDelta int64
 	shard.mu.Lock()
-	oldValue, existed := shard.data[keyCopy]
+	oldValue, existed := shard.get(keyCopy)
 
 	// Evaluate NX/XX preconditions inside the lock so the check and the write
 	// are atomic.
@@ -63,7 +63,7 @@ func (s *LockFreeStore) SetWithOptions(key, value string, opts SetOptions) (bool
 		shard.mu.Unlock()
 		return false, pkgErrors.NewMemoryLimit(atomic.LoadInt64(&s.totalMemory)+memoryDelta, s.limits.MaxMemoryUsage)
 	}
-	shard.data[keyCopy] = storedValue
+	shard.put(keyCopy, storedValue)
 
 	// TTL handling, all under the shard lock (consistent with the expiry cleaner):
 	//   - SetTTL   -> apply the new expiry
@@ -121,7 +121,7 @@ func (s *LockFreeStore) Set(key, value string) error {
 	// ULTRA MINIMAL CRITICAL SECTION: Check existence and assign
 	var memoryDelta int64
 	shard.mu.Lock()
-	oldValue, existed := shard.data[keyCopy]
+	oldValue, existed := shard.get(keyCopy)
 	if existed && oldValue != nil {
 		memoryDelta = storedValue.memorySize - oldValue.memorySize
 	} else {
@@ -133,7 +133,7 @@ func (s *LockFreeStore) Set(key, value string) error {
 		shard.mu.Unlock()
 		return pkgErrors.NewMemoryLimit(atomic.LoadInt64(&s.totalMemory)+memoryDelta, s.limits.MaxMemoryUsage)
 	}
-	shard.data[keyCopy] = storedValue
+	shard.put(keyCopy, storedValue)
 	// A plain SET clears any previous TTL on the key (Redis semantics).
 	// Clearing it under the same shard lock that guards the data keeps the
 	// (value, expiry) pair consistent for the expiry cleaner, which likewise
@@ -167,7 +167,7 @@ func (s *LockFreeStore) Get(key string) (string, bool) {
 
 	// MINIMAL CRITICAL SECTION: Just read pointer
 	shard.mu.RLock()
-	value := shard.data[key]
+	value := shard.getV(key)
 	shard.mu.RUnlock()
 
 	// Process OUTSIDE critical section
@@ -206,7 +206,7 @@ func (s *LockFreeStore) Get(key string) (string, bool) {
 func (s *LockFreeStore) GetString(key string) (string, bool, error) {
 	shard := s.shards[int(FastHash(key)&s.shardMask)]
 	shard.mu.RLock()
-	sv := shard.data[key]
+	sv := shard.getV(key)
 	if sv == nil || s.isExpiredFast(shard, key) {
 		shard.mu.RUnlock()
 		return "", false, nil
@@ -242,9 +242,9 @@ func (s *LockFreeStore) Delete(key string) bool {
 
 	// MINIMAL CRITICAL SECTION: Check and delete atomically
 	shard.mu.Lock()
-	oldValue, existed := shard.data[key]
+	oldValue, existed := shard.get(key)
 	if existed {
-		delete(shard.data, key)
+		shard.del(key)
 	}
 	shard.mu.Unlock()
 
@@ -285,7 +285,7 @@ func (s *LockFreeStore) Exists(keys ...string) int64 {
 		shard := s.shards[int(hash&s.shardMask)]
 
 		shard.mu.RLock()
-		_, exists := shard.data[key]
+		_, exists := shard.get(key)
 		shard.mu.RUnlock()
 
 		// An expired-but-not-yet-collected key must count as absent.
@@ -305,7 +305,7 @@ func (s *LockFreeStore) IncrBy(key string, increment int64) (int64, error) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedValue, exists := shard.data[key]
+	storedValue, exists := shard.get(key)
 	var currentValue int64
 
 	// Cluster mode: maintain a PN-counter CRDT so concurrent increments on
@@ -364,7 +364,7 @@ func (s *LockFreeStore) IncrBy(key string, increment int64) (int64, error) {
 		StringVal:  newValueStr,
 		memorySize: int64(len(key) + len(newValueStr)),
 	}
-	shard.data[key] = newSV
+	shard.put(key, newSV)
 
 	if exists {
 		s.accountMemoryDelta(shard, newSV.memorySize-oldMem)
@@ -402,7 +402,7 @@ func (s *LockFreeStore) Append(key, value string) (int64, error) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedValue, exists := shard.data[key]
+	storedValue, exists := shard.get(key)
 	var newValue string
 
 	var oldMem int64
@@ -427,7 +427,7 @@ func (s *LockFreeStore) Append(key, value string) (int64, error) {
 		StringVal:  newValue,
 		memorySize: int64(len(key) + len(newValue)),
 	}
-	shard.data[key] = newSV
+	shard.put(key, newSV)
 
 	if exists {
 		s.accountMemoryDelta(shard, newSV.memorySize-oldMem)
@@ -448,7 +448,7 @@ func (s *LockFreeStore) StrLen(key string) (int64, error) {
 	shard := s.shards[int(hash&s.shardMask)]
 
 	shard.mu.RLock()
-	storedValue, exists := shard.data[key]
+	storedValue, exists := shard.get(key)
 	shard.mu.RUnlock()
 
 	if !exists || storedValue == nil {
@@ -470,7 +470,7 @@ func (s *LockFreeStore) GetSet(key, value string) (string, bool, error) {
 	shard := s.shards[int(hash&s.shardMask)]
 
 	shard.mu.Lock()
-	oldStoredValue, existed := shard.data[key]
+	oldStoredValue, existed := shard.get(key)
 
 	// Check if the key holds the wrong type
 	if existed && oldStoredValue != nil && !oldStoredValue.IsString() {
@@ -496,7 +496,7 @@ func (s *LockFreeStore) GetSet(key, value string) (string, bool, error) {
 		StringVal:  value,
 		memorySize: int64(len(key) + len(value)),
 	}
-	shard.data[key] = newSV
+	shard.put(key, newSV)
 	// GETSET discards any TTL, as SET does (Redis semantics).
 	shard.expiryMu.Lock()
 	delete(shard.expiry, key)

@@ -66,28 +66,28 @@ func (s *LockFreeStore) withShardWrite(key string, fn ShardWriteFunc) ShardOpera
 
 // getValue safely gets a value from shard data
 func getValue(shard *LockFreeShard, key string) (value *StoredValue, found bool) {
-	value, found = shard.data[key]
+	value, found = shard.get(key)
 	return
 }
 
 // setValue safely sets a value in shard data
 func setValue(shard *LockFreeShard, key string, value *StoredValue) {
-	shard.data[key] = value
+	shard.put(key, value)
 }
 
 // deleteValue safely deletes a value from shard data
 func deleteValue(shard *LockFreeShard, key string) (existed bool) {
-	_, existed = shard.data[key]
+	_, existed = shard.get(key)
 	if existed {
-		delete(shard.data, key)
+		shard.del(key)
 	}
 	return
 }
 
 // updateValue safely updates a value in shard data if it exists and matches expected
 func updateValue(shard *LockFreeShard, key string, expected, new *StoredValue) (updated bool) {
-	if current, exists := shard.data[key]; exists && current == expected {
-		shard.data[key] = new
+	if current, exists := shard.get(key); exists && current == expected {
+		shard.put(key, new)
 		return true
 	}
 	return false

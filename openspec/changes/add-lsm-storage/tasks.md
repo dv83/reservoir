@@ -2,7 +2,7 @@
 
 - [x] 1.1 Add the Pebble dependency and an engine wrapper (open, batch, get, prefix scan, close) with tests
 - [x] 1.2 Binary codec for StoredValue and every CRDT, with round-trip property tests
-- [ ] 1.3 Route all shard map access through get/put/del helpers (no behavior change in memory mode)
+- [x] 1.3 Route all shard map access through get/put/del helpers (no behavior change in memory mode)
 
 ## 2. Write-through cache
 

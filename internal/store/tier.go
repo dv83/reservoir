@@ -218,7 +218,7 @@ func (s *LockFreeStore) spillShard(shard *LockFreeShard, need int64) int64 {
 		cold.cold = &ref
 		saved := int64(ref.ValLen) - coldRefSize
 		cold.memorySize = sv.MemoryUsage() - saved
-		shard.data[key] = &cold
+		shard.put(key, &cold)
 		s.accountMemoryDelta(shard, -saved)
 		freed += saved
 		t.spilledKeys.Add(1)
@@ -273,7 +273,7 @@ func (s *LockFreeStore) collectValueLog() int64 {
 		shard := s.getShard(k)
 		shard.mu.Lock()
 		defer shard.mu.Unlock()
-		sv, ok := shard.data[k]
+		sv, ok := shard.get(k)
 		if !ok || sv == nil || sv.cold == nil || *sv.cold != old {
 			return false // overwritten, deleted or already moved: dead
 		}
@@ -284,7 +284,7 @@ func (s *LockFreeStore) collectValueLog() int64 {
 		}
 		moved := *sv
 		moved.cold = &ref
-		shard.data[k] = &moved
+		shard.put(k, &moved)
 		t.gcMoved.Add(1)
 		return true
 	})

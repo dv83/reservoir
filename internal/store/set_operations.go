@@ -29,7 +29,7 @@ func (s *LockFreeStore) SAdd(key string, members ...string) (logN int64, logErr 
 	var setValue *SetValue
 	var exists bool
 
-	if storedValue, ok := shard.data[key]; ok {
+	if storedValue, ok := shard.get(key); ok {
 		if !storedValue.IsSet() {
 			return 0, pkgErrors.ErrWrongType
 		}
@@ -58,7 +58,7 @@ func (s *LockFreeStore) SAdd(key string, members ...string) (logN int64, logErr 
 			return 0, pkgErrors.NewMemoryLimit(newMemory, s.limits.MaxMemoryUsage)
 		}
 
-		shard.data[key] = storedSet
+		shard.put(key, storedSet)
 
 		atomic.AddInt64(&shard.keyCount, 1)
 		atomic.AddInt64(&s.totalKeys, 1)
@@ -72,7 +72,7 @@ func (s *LockFreeStore) SAdd(key string, members ...string) (logN int64, logErr 
 		// SRem. Wrapping it in a fresh StoredValue (as before) reset memorySize
 		// to zero, so the next SAdd computed a negative oldSize and inflated
 		// totalMemory on every call.
-		storedValue := shard.data[key]
+		storedValue := shard.getV(key)
 		oldSize := storedValue.memorySize - int64(unsafe.Sizeof(*storedValue))
 		newSize := setValue.MemoryUsage()
 		memoryDelta := newSize - oldSize
@@ -102,7 +102,7 @@ func (s *LockFreeStore) SRem(key string, members ...string) (logN int64, logErr 
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return 0, nil // Key doesn't exist
 	}
@@ -116,7 +116,7 @@ func (s *LockFreeStore) SRem(key string, members ...string) (logN int64, logErr 
 
 	// If set becomes empty, delete the key
 	if setValue.IsEmpty() {
-		delete(shard.data, key)
+		shard.del(key)
 		// Free MemoryUsage() only, symmetric with SAdd's create path and the
 		// generic Delete path (which also frees MemoryUsage()).
 		freed := storedValue.MemoryUsage()
@@ -146,7 +146,7 @@ func (s *LockFreeStore) SIsMember(key string, member string) (bool, error) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return false, nil // Key doesn't exist
 	}
@@ -167,7 +167,7 @@ func (s *LockFreeStore) SCard(key string) (int64, error) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 
 	if !ok {
 		return 0, nil // Key doesn't exist
@@ -189,7 +189,7 @@ func (s *LockFreeStore) SMembers(key string) ([]string, error) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return []string{}, nil // Key doesn't exist, return empty slice
 	}
@@ -215,7 +215,7 @@ func (s *LockFreeStore) SPop(key string) (logV string, logOK bool, logErr error)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return "", false, nil // Key doesn't exist
 	}
@@ -233,7 +233,7 @@ func (s *LockFreeStore) SPop(key string) (logV string, logOK bool, logErr error)
 
 	// If set becomes empty, delete the key
 	if setValue.IsEmpty() {
-		delete(shard.data, key)
+		shard.del(key)
 		atomic.AddInt64(&shard.keyCount, -1)
 		atomic.AddInt64(&s.totalKeys, -1)
 		atomic.AddInt64(&shard.memoryUsage, -storedValue.MemoryUsage())
@@ -265,7 +265,7 @@ func (s *LockFreeStore) SDiff(keys ...string) ([]string, error) {
 	firstShard := s.getShard(keys[0])
 	firstShard.mu.RLock()
 
-	storedValue, ok := firstShard.data[keys[0]]
+	storedValue, ok := firstShard.get(keys[0])
 	if !ok {
 		firstShard.mu.RUnlock()
 		return []string{}, nil // First set doesn't exist
@@ -290,7 +290,7 @@ func (s *LockFreeStore) SDiff(keys ...string) ([]string, error) {
 		otherShard := s.getShard(keys[i])
 		otherShard.mu.RLock()
 
-		if otherValue, exists := otherShard.data[keys[i]]; exists {
+		if otherValue, exists := otherShard.get(keys[i]); exists {
 			if !otherValue.IsSet() {
 				otherShard.mu.RUnlock()
 				return nil, pkgErrors.ErrWrongType
@@ -328,7 +328,7 @@ func (s *LockFreeStore) SInter(keys ...string) ([]string, error) {
 		shard := s.getShard(key)
 		shard.mu.RLock()
 
-		storedValue, exists := shard.data[key]
+		storedValue, exists := shard.get(key)
 		if !exists {
 			// If any set is missing, the intersection is empty.
 			shard.mu.RUnlock()
@@ -370,7 +370,7 @@ func (s *LockFreeStore) SUnion(keys ...string) ([]string, error) {
 		shard := s.getShard(key)
 		shard.mu.RLock()
 
-		if storedValue, exists := shard.data[key]; exists {
+		if storedValue, exists := shard.get(key); exists {
 			if !storedValue.IsSet() {
 				shard.mu.RUnlock()
 				return nil, pkgErrors.ErrWrongType
@@ -429,7 +429,7 @@ func (s *LockFreeStore) SStats(key string) (map[string]interface{}, error) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return nil, errors.New("Key not found")
 	}

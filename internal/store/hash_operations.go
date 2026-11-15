@@ -30,7 +30,7 @@ func (s *LockFreeStore) HSet(key string, fieldValues ...string) (logN int64, log
 	var hashValue *HashValue
 	var exists bool
 
-	if storedValue, ok := shard.data[key]; ok {
+	if storedValue, ok := shard.get(key); ok {
 		if !storedValue.IsHash() {
 			return 0, pkgErrors.ErrWrongType
 		}
@@ -60,7 +60,7 @@ func (s *LockFreeStore) HSet(key string, fieldValues ...string) (logN int64, log
 			return 0, pkgErrors.NewMemoryLimit(newMemory, s.limits.MaxMemoryUsage)
 		}
 
-		shard.data[key] = storedHash
+		shard.put(key, storedHash)
 
 		atomic.AddInt64(&shard.keyCount, 1)
 		atomic.AddInt64(&s.totalKeys, 1)
@@ -69,7 +69,7 @@ func (s *LockFreeStore) HSet(key string, fieldValues ...string) (logN int64, log
 
 	} else if exists {
 		// Update existing hash - update memory usage
-		if oldStoredValue, ok := shard.data[key]; ok {
+		if oldStoredValue, ok := shard.get(key); ok {
 			oldSize := oldStoredValue.memorySize - int64(unsafe.Sizeof(*oldStoredValue))
 			newSize := hashValue.MemoryUsage()
 			memoryDelta := newSize - oldSize
@@ -94,7 +94,7 @@ func (s *LockFreeStore) HGet(key, field string) (string, bool, error) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return "", false, nil // Key doesn't exist
 	}
@@ -116,7 +116,7 @@ func (s *LockFreeStore) HMGet(key string, fields ...string) ([]string, []bool, e
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		// Key doesn't exist, return nil for all fields
 		result := make([]string, len(fields))
@@ -162,7 +162,7 @@ func (s *LockFreeStore) HDel(key string, fields ...string) (logN int64, logErr e
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return 0, nil // Key doesn't exist
 	}
@@ -176,7 +176,7 @@ func (s *LockFreeStore) HDel(key string, fields ...string) (logN int64, logErr e
 
 	// If hash becomes empty, delete the key
 	if hashValue.IsEmpty() {
-		delete(shard.data, key)
+		shard.del(key)
 		atomic.AddInt64(&shard.keyCount, -1)
 		atomic.AddInt64(&s.totalKeys, -1)
 		atomic.AddInt64(&shard.memoryUsage, -storedValue.MemoryUsage())
@@ -203,7 +203,7 @@ func (s *LockFreeStore) HExists(key, field string) (bool, error) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return false, nil // Key doesn't exist
 	}
@@ -224,7 +224,7 @@ func (s *LockFreeStore) HLen(key string) (int64, error) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return 0, nil // Key doesn't exist
 	}
@@ -245,7 +245,7 @@ func (s *LockFreeStore) HKeys(key string) ([]string, error) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return []string{}, nil // Key doesn't exist, return empty slice
 	}
@@ -266,7 +266,7 @@ func (s *LockFreeStore) HVals(key string) ([]string, error) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return []string{}, nil // Key doesn't exist, return empty slice
 	}
@@ -287,7 +287,7 @@ func (s *LockFreeStore) HGetAll(key string) ([]string, error) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	storedValue, ok := shard.data[key]
+	storedValue, ok := shard.get(key)
 	if !ok {
 		return []string{}, nil // Key doesn't exist, return empty slice
 	}
@@ -316,7 +316,7 @@ func (s *LockFreeStore) HIncrBy(key, field string, increment int64) (logN int64,
 	var hashValue *HashValue
 	var exists bool
 
-	if storedValue, ok := shard.data[key]; ok {
+	if storedValue, ok := shard.get(key); ok {
 		if !storedValue.IsHash() {
 			return 0, pkgErrors.ErrWrongType
 		}
@@ -346,7 +346,7 @@ func (s *LockFreeStore) HIncrBy(key, field string, increment int64) (logN int64,
 			return 0, pkgErrors.NewMemoryLimit(newMemory, s.limits.MaxMemoryUsage)
 		}
 
-		shard.data[key] = storedHash
+		shard.put(key, storedHash)
 
 		atomic.AddInt64(&shard.keyCount, 1)
 		atomic.AddInt64(&s.totalKeys, 1)
@@ -354,7 +354,7 @@ func (s *LockFreeStore) HIncrBy(key, field string, increment int64) (logN int64,
 		atomic.AddInt64(&s.totalMemory, memoryDelta)
 	} else {
 		// Update existing hash memory usage
-		if oldStoredValue, ok := shard.data[key]; ok {
+		if oldStoredValue, ok := shard.get(key); ok {
 			oldSize := oldStoredValue.memorySize - int64(unsafe.Sizeof(*oldStoredValue))
 			newSize := hashValue.MemoryUsage()
 			memoryDelta := newSize - oldSize
@@ -387,7 +387,7 @@ func (s *LockFreeStore) HIncrByFloat(key, field string, increment float64) (logF
 	var hashValue *HashValue
 	var exists bool
 
-	if storedValue, ok := shard.data[key]; ok {
+	if storedValue, ok := shard.get(key); ok {
 		if !storedValue.IsHash() {
 			return 0, pkgErrors.ErrWrongType
 		}
@@ -417,7 +417,7 @@ func (s *LockFreeStore) HIncrByFloat(key, field string, increment float64) (logF
 			return 0, pkgErrors.NewMemoryLimit(newMemory, s.limits.MaxMemoryUsage)
 		}
 
-		shard.data[key] = storedHash
+		shard.put(key, storedHash)
 
 		atomic.AddInt64(&shard.keyCount, 1)
 		atomic.AddInt64(&s.totalKeys, 1)
@@ -425,7 +425,7 @@ func (s *LockFreeStore) HIncrByFloat(key, field string, increment float64) (logF
 		atomic.AddInt64(&s.totalMemory, memoryDelta)
 	} else {
 		// Update existing hash memory usage
-		if oldStoredValue, ok := shard.data[key]; ok {
+		if oldStoredValue, ok := shard.get(key); ok {
 			oldSize := oldStoredValue.memorySize - int64(unsafe.Sizeof(*oldStoredValue))
 			newSize := hashValue.MemoryUsage()
 			memoryDelta := newSize - oldSize

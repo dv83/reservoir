@@ -178,7 +178,7 @@ func (ebp *ExpiryBatchProcessor) deleteExpiredDirect(shard *LockFreeShard, key s
 // accounting), as in tests that build a processor on its own.
 func reapExpired(store *LockFreeStore, shard *LockFreeShard, key string) bool {
 	shard.mu.Lock()
-	oldValue, existed := shard.data[key]
+	oldValue, existed := shard.get(key)
 
 	stillExpired := false
 	var deadline time.Time
@@ -192,7 +192,7 @@ func reapExpired(store *LockFreeStore, shard *LockFreeShard, key string) bool {
 
 	if stillExpired {
 		recordExpiryTombstone(shard, key, oldValue, deadline)
-		delete(shard.data, key)
+		shard.del(key)
 		shard.expiryMu.Lock()
 		delete(shard.expiry, key)
 		shard.expiryMu.Unlock()

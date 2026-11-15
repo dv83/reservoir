@@ -56,7 +56,7 @@ func (s *LockFreeStore) SetWithHLC(key, value string, stamp hlcStamp) (bool, err
 	shard := s.shards[int(FastHash(key)&s.shardMask)]
 
 	shard.mu.Lock()
-	oldValue, existed := shard.data[keyCopy]
+	oldValue, existed := shard.get(keyCopy)
 
 	// LWW guard: drop the write if the stored value's stamp is newer or equal.
 	if existed && oldValue != nil && !stamp.After(oldValue.hlc) {
@@ -81,7 +81,7 @@ func (s *LockFreeStore) SetWithHLC(key, value string, stamp hlcStamp) (bool, err
 		shard.mu.Unlock()
 		return false, pkgErrors.NewMemoryLimit(atomic.LoadInt64(&s.totalMemory)+memoryDelta, s.limits.MaxMemoryUsage)
 	}
-	shard.data[keyCopy] = newSV
+	shard.put(keyCopy, newSV)
 	// This write supersedes any tombstone for the key.
 	delete(shard.tombstones, keyCopy)
 
@@ -119,7 +119,7 @@ func (s *LockFreeStore) DeleteWithHLC(key string, stamp hlcStamp) bool {
 	shard := s.shards[int(FastHash(key)&s.shardMask)]
 
 	shard.mu.Lock()
-	oldValue, existed := shard.data[key]
+	oldValue, existed := shard.get(key)
 
 	// Drop the delete if a newer write already won.
 	if existed && oldValue != nil && !stamp.After(oldValue.hlc) {
@@ -209,7 +209,7 @@ func (s *LockFreeStore) gcTombstones(retain time.Duration) int {
 			}
 			if empty {
 				freed := v.MemoryUsage()
-				delete(shard.data, k)
+				shard.del(k)
 				atomic.AddInt64(&shard.keyCount, -1)
 				atomic.AddInt64(&s.totalKeys, -1)
 				atomic.AddInt64(&shard.memoryUsage, -freed)
@@ -352,7 +352,7 @@ func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
 func (s *LockFreeStore) GetHLC(key string) (hlcStamp, bool) {
 	shard := s.shards[int(FastHash(key)&s.shardMask)]
 	shard.mu.RLock()
-	v, ok := shard.data[key]
+	v, ok := shard.get(key)
 	shard.mu.RUnlock()
 	if !ok || v == nil {
 		return hlcStamp{}, false

@@ -14,7 +14,7 @@ import (
 func (s *LockFreeStore) readValue(shard *LockFreeShard, key string) (interface{}, bool) {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
-	value, exists := shard.data[key]
+	value, exists := shard.get(key)
 	return value, exists
 }
 
@@ -82,7 +82,7 @@ func (s *LockFreeStore) LPush(key string, elements ...string) (logN int64, logEr
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	if storedVal, exists := shard.data[key]; exists {
+	if storedVal, exists := shard.get(key); exists {
 		// Key exists - check type and modify in-place
 		if storedVal.Type != ValueTypeList {
 			return 0, fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value")
@@ -119,7 +119,7 @@ func (s *LockFreeStore) LPush(key string, elements ...string) (logN int64, logEr
 	}
 
 	storedVal := newStoredList(newList)
-	shard.data[key] = storedVal
+	shard.put(key, storedVal)
 
 	// Update stats
 	s.trackNewKey(shard, storedVal.MemoryUsage())
@@ -151,7 +151,7 @@ func (s *LockFreeStore) RPush(key string, elements ...string) (logN int64, logEr
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	if storedVal, exists := shard.data[key]; exists {
+	if storedVal, exists := shard.get(key); exists {
 		// Key exists - check type and modify in-place
 		if storedVal.Type != ValueTypeList {
 			return 0, fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value")
@@ -188,7 +188,7 @@ func (s *LockFreeStore) RPush(key string, elements ...string) (logN int64, logEr
 	}
 
 	storedVal := newStoredList(newList)
-	shard.data[key] = storedVal
+	shard.put(key, storedVal)
 
 	// Update stats
 	s.trackNewKey(shard, storedVal.MemoryUsage())
@@ -237,7 +237,7 @@ func (s *LockFreeStore) LPop(key string, count int) (logVals []string, logErr er
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedVal, exists := shard.data[key]
+	storedVal, exists := shard.get(key)
 	if !exists {
 		return []string{}, nil
 	}
@@ -258,7 +258,7 @@ func (s *LockFreeStore) LPop(key string, count int) (logVals []string, logErr er
 
 	// Check if list became empty
 	if list.IsEmpty() {
-		delete(shard.data, key)
+		shard.del(key)
 		s.trackDeletedKey(shard, valSize)
 		return result, nil
 	}
@@ -296,7 +296,7 @@ func (s *LockFreeStore) RPop(key string, count int) (logVals []string, logErr er
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedVal, exists := shard.data[key]
+	storedVal, exists := shard.get(key)
 	if !exists {
 		return []string{}, nil
 	}
@@ -317,7 +317,7 @@ func (s *LockFreeStore) RPop(key string, count int) (logVals []string, logErr er
 
 	// Check if list became empty
 	if list.IsEmpty() {
-		delete(shard.data, key)
+		shard.del(key)
 		s.trackDeletedKey(shard, valSize)
 		return result, nil
 	}
@@ -389,7 +389,7 @@ func (s *LockFreeStore) LSet(key string, index int64, element string) (logErr er
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedVal, exists := shard.data[key]
+	storedVal, exists := shard.get(key)
 	if !exists {
 		return fmt.Errorf("no such key")
 	}
@@ -425,7 +425,7 @@ func (s *LockFreeStore) LRem(key string, count int64, element string) (logN int6
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedVal, exists := shard.data[key]
+	storedVal, exists := shard.get(key)
 	if !exists {
 		return 0, nil
 	}
@@ -439,7 +439,7 @@ func (s *LockFreeStore) LRem(key string, count int64, element string) (logN int6
 	removed := list.Remove(count, element)
 
 	if list.IsEmpty() {
-		delete(shard.data, key)
+		shard.del(key)
 		s.trackDeletedKey(shard, valSize)
 		return removed, nil
 	}
@@ -466,7 +466,7 @@ func (s *LockFreeStore) LTrim(key string, start, stop int64) (logErr error) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedVal, exists := shard.data[key]
+	storedVal, exists := shard.get(key)
 	if !exists {
 		return nil
 	}
@@ -480,7 +480,7 @@ func (s *LockFreeStore) LTrim(key string, start, stop int64) (logErr error) {
 	list.Trim(start, stop)
 
 	if list.IsEmpty() {
-		delete(shard.data, key)
+		shard.del(key)
 		s.trackDeletedKey(shard, valSize)
 		return nil
 	}
@@ -511,7 +511,7 @@ func (s *LockFreeStore) LPushX(key string, elements ...string) (logN int64, logE
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedVal, exists := shard.data[key]
+	storedVal, exists := shard.get(key)
 	if !exists {
 		return 0, nil // Key doesn't exist, return 0
 	}
@@ -557,7 +557,7 @@ func (s *LockFreeStore) RPushX(key string, elements ...string) (logN int64, logE
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	storedVal, exists := shard.data[key]
+	storedVal, exists := shard.get(key)
 	if !exists {
 		return 0, nil // Key doesn't exist, return 0
 	}
@@ -606,7 +606,7 @@ func (s *LockFreeStore) LPushUnique(key string, elements ...string) (logN int64,
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	if storedVal, exists := shard.data[key]; exists {
+	if storedVal, exists := shard.get(key); exists {
 		if storedVal.Type != ValueTypeList {
 			return 0, fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value")
 		}
@@ -636,7 +636,7 @@ func (s *LockFreeStore) LPushUnique(key string, elements ...string) (logN int64,
 	}
 
 	storedVal := newStoredList(newList)
-	shard.data[key] = storedVal
+	shard.put(key, storedVal)
 
 	s.trackNewKey(shard, storedVal.MemoryUsage())
 
@@ -666,7 +666,7 @@ func (s *LockFreeStore) RPushUnique(key string, elements ...string) (logN int64,
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	if storedVal, exists := shard.data[key]; exists {
+	if storedVal, exists := shard.get(key); exists {
 		if storedVal.Type != ValueTypeList {
 			return 0, fmt.Errorf("WRONGTYPE Operation against a key holding the wrong kind of value")
 		}
@@ -696,7 +696,7 @@ func (s *LockFreeStore) RPushUnique(key string, elements ...string) (logN int64,
 	}
 
 	storedVal := newStoredList(newList)
-	shard.data[key] = storedVal
+	shard.put(key, storedVal)
 
 	s.trackNewKey(shard, storedVal.MemoryUsage())
 

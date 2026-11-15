@@ -91,7 +91,7 @@ func isResettableContainer(sv *StoredValue) bool {
 // removed and whether anything of it was kept. The caller holds shard.mu and
 // handles commit logging; accounting is done here.
 func (s *LockFreeStore) applyReset(shard *LockFreeShard, key string, r hlcStamp) (removed, kept bool) {
-	sv, ok := shard.data[key]
+	sv, ok := shard.get(key)
 	if !ok || sv == nil {
 		return false, false
 	}
@@ -124,7 +124,7 @@ func (s *LockFreeStore) applyReset(shard *LockFreeShard, key string, r hlcStamp)
 		return false, true
 	}
 	freed := sv.MemoryUsage()
-	delete(shard.data, key)
+	shard.del(key)
 	shard.expiryMu.Lock()
 	delete(shard.expiry, key)
 	shard.expiryMu.Unlock()
