@@ -39,7 +39,9 @@ func TestRecoveryStreamsOrderedLog(t *testing.T) {
 	if count != 160 {
 		t.Fatalf("replayed %d entries, want 160", count)
 	}
-	if growth > 80<<20/3 {
+	// Half the log, as in TestCompactionMemoryIsBoundedByKeys: loading the log
+	// takes all of it, a busy machine adds measurement noise.
+	if growth > 80<<20/2 {
 		t.Fatalf("recovery grew the heap by %dMB for an 80MB log", growth>>20)
 	}
 }

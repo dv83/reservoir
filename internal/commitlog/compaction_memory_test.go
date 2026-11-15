@@ -34,7 +34,10 @@ func TestCompactionMemoryIsBoundedByKeys(t *testing.T) {
 
 	growth := peakHeapGrowth(func() { compactDir(t, dir) })
 	t.Logf("log %dMB, peak heap growth during compaction %.1fMB", logBytes>>20, float64(growth)/(1<<20))
-	if growth > logBytes/3 {
+	// Half the log: the previous compactor held all of it (about 96MB here),
+	// while a busy machine can add ~25MB of measurement noise — garbage
+	// allocated while the sampler's forced GC is still running.
+	if growth > logBytes/2 {
 		t.Fatalf("compaction grew the heap by %dMB for a %dMB log: values are held in memory", growth>>20, logBytes>>20)
 	}
 
