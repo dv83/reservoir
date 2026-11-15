@@ -85,6 +85,18 @@ curl http://localhost:8080/api/stats
 **Note**: When running high-load tests with `redis-benchmark -c 200`, the default rate limit (2000/min) should be
 sufficient. If you see connection rejections, increase the rate limit or disable it temporarily.
 
+### Tiered Storage (values larger than RAM)
+
+With tiering, string values beyond `--max-memory` move to value files on disk
+instead of writes failing; keys, stamps and TTLs stay in RAM. Requires the commit
+log, which rebuilds the value files on every start.
+
+```bash
+./reservoir --commit-log-enabled --tiering-enabled --max-memory=1073741824 \
+  --tiering-dir=./data/values --monitoring-enabled
+curl http://localhost:8080/api/tier   # budget, cold keys/bytes, spills, cold reads, GC
+```
+
 ### Testing the Server
 
 ```bash

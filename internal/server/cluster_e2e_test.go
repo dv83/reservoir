@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,12 @@ func freePort(t *testing.T) int {
 func newE2ENode(t *testing.T, clusterID cluster.UUIDv7) *e2eNode {
 	t.Helper()
 	st := store.NewStore(&store.Limits{MaxKeySize: 1024, MaxValueSize: 1 << 20, MaxMemoryUsage: 1 << 30})
+	return newE2ENodeWithStore(t, clusterID, st)
+}
+
+// newE2ENodeWithStore starts a cluster node around a prepared store.
+func newE2ENodeWithStore(t *testing.T, clusterID cluster.UUIDv7, st *store.LockFreeStore) *e2eNode {
+	t.Helper()
 	port := freePort(t)
 	cm := cluster.NewClusterManager("127.0.0.1", port, clusterID)
 	cm.SetReplicationHandler(&StoreReplicationHandler{Store: st})
@@ -233,7 +240,27 @@ func TestClusterEndToEndConvergence(t *testing.T) {
 func newE2ECluster(t *testing.T) []*e2eNode {
 	t.Helper()
 	clusterID := cluster.NewUUIDv7()
-	nodes := []*e2eNode{newE2ENode(t, clusterID), newE2ENode(t, clusterID), newE2ENode(t, clusterID)}
+	return joinE2ECluster(t, []*e2eNode{newE2ENode(t, clusterID), newE2ENode(t, clusterID), newE2ENode(t, clusterID)})
+}
+
+// newTieredE2ECluster is newE2ECluster with tiered storage on every node and
+// the given memory budget.
+func newTieredE2ECluster(t *testing.T, budget int64) []*e2eNode {
+	t.Helper()
+	clusterID := cluster.NewUUIDv7()
+	var nodes []*e2eNode
+	for i := 0; i < 3; i++ {
+		st := store.NewStore(&store.Limits{MaxKeySize: 1024, MaxValueSize: 1 << 20, MaxMemoryUsage: budget})
+		if err := st.EnableTiering(t.TempDir(), 1<<20); err != nil {
+			t.Fatal(err)
+		}
+		nodes = append(nodes, newE2ENodeWithStore(t, clusterID, st))
+	}
+	return joinE2ECluster(t, nodes)
+}
+
+func joinE2ECluster(t *testing.T, nodes []*e2eNode) []*e2eNode {
+	t.Helper()
 	t.Cleanup(func() {
 		for _, n := range nodes {
 			n.stop()
@@ -577,6 +604,61 @@ func TestClusterFlushAllConverges(t *testing.T) {
 		}
 		if v, _ := n.store.Get("after"); v != "kept" {
 			t.Errorf("node %d: write after FLUSHALL = %q, want kept", i, v)
+		}
+	}
+}
+
+// TestClusterTieredDatasetLargerThanRAM (add-tiered-storage, task 3.8): three
+// nodes with tiering, each with a 1MB memory budget, receive 3MB of values
+// written on all of them, then overwrites and anti-entropy. Every node ends
+// with every key readable and identical, stays near its budget, and keeps most
+// values on disk — spilling never shows up as a write or a delete on peers.
+func TestClusterTieredDatasetLargerThanRAM(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cluster e2e test in -short mode")
+	}
+	const budget, n = 1 << 20, 3000
+	nodes := newTieredE2ECluster(t, budget)
+	value := func(i, gen int) string { return fmt.Sprintf("%06d-%d-", i, gen) + strings.Repeat("v", 1000) }
+
+	for i := 0; i < n; i++ {
+		nodes[i%3].set(fmt.Sprintf("big%d", i), value(i, 0))
+	}
+	// Overwrite a tenth of the keys from a different node than wrote them.
+	for i := 0; i < n; i += 10 {
+		nodes[(i+1)%3].set(fmt.Sprintf("big%d", i), value(i, 1))
+	}
+	want := func(i int) string {
+		if i%10 == 0 {
+			return value(i, 1)
+		}
+		return value(i, 0)
+	}
+	converged := func() bool {
+		for _, nd := range nodes {
+			for i := 0; i < n; i++ {
+				v, ok, err := nd.store.GetString(fmt.Sprintf("big%d", i))
+				if err != nil || !ok || v != want(i) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	ok := eventually(30*time.Second, converged)
+	fullReconcile(nodes)
+	if !ok || !converged() {
+		t.Fatal("nodes did not converge on the dataset")
+	}
+	for i, nd := range nodes {
+		stats := nd.store.TierStats()
+		t.Logf("node %d: memory %d/%d, cold keys %v, value bytes on disk %v", i,
+			nd.store.GetMemoryUsage(), budget, stats["cold_keys"], stats["value_disk_bytes"])
+		if stats["cold_keys"].(int64) < n/2 {
+			t.Errorf("node %d keeps only %v keys cold", i, stats["cold_keys"])
+		}
+		if used := nd.store.GetMemoryUsage(); used > budget*11/10 {
+			t.Errorf("node %d uses %d bytes, budget %d", i, used, budget)
 		}
 	}
 }

@@ -37,6 +37,13 @@ type Config struct {
 	// Commit Log configuration
 	CommitLogEnabled bool
 	CommitLogDir     string
+
+	// Tiered storage (add-tiered-storage): string values beyond the memory
+	// budget (MaxMemoryUsage) move to value files in TieringDir instead of
+	// writes failing. Requires the commit log, which rebuilds them on restart.
+	TieringEnabled  bool
+	TieringDir      string
+	TieringFileSize int64
 }
 
 // DefaultConfig returns a configuration with default values
@@ -66,6 +73,8 @@ func DefaultConfig() *Config {
 		ClusterID:        "",
 		CommitLogEnabled: false,
 		CommitLogDir:     "./data/commitlog",
+		TieringDir:       "./data/values",
+		TieringFileSize:  256 << 20,
 	}
 }
 
@@ -103,6 +112,11 @@ func ParseFlags() *Config {
 	commitLogEnabled := flag.Bool("commit-log-enabled", config.CommitLogEnabled, "Enable persistent commit log")
 	commitLogDir := flag.String("commit-log-dir", config.CommitLogDir, "Directory for commit log files")
 
+	// Tiered storage flags
+	tieringEnabled := flag.Bool("tiering-enabled", config.TieringEnabled, "Move string values to disk when memory reaches --max-memory instead of rejecting writes (requires --commit-log-enabled)")
+	tieringDir := flag.String("tiering-dir", config.TieringDir, "Directory for spilled value files (discarded and rebuilt on restart)")
+	tieringFileSize := flag.Int64("tiering-file-size", config.TieringFileSize, "Size in bytes at which a value file is rotated")
+
 	flag.Parse()
 
 	// Apply parsed values
@@ -138,6 +152,9 @@ func ParseFlags() *Config {
 	}
 	config.CommitLogEnabled = *commitLogEnabled
 	config.CommitLogDir = *commitLogDir
+	config.TieringEnabled = *tieringEnabled
+	config.TieringDir = *tieringDir
+	config.TieringFileSize = *tieringFileSize
 
 	return config
 }

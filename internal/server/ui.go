@@ -121,6 +121,25 @@ func StartUIServer(addr string, kvStore store.KVStore, clusterManager *cluster.C
 		}
 	})
 
+	// API Endpoint for tiered storage: RAM budget and use, cold keys and bytes,
+	// value files, spills, cold reads and value-log collection.
+	mux.HandleFunc("/api/tier", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		stats := kvStore.TierStats()
+		if stats == nil {
+			stats = map[string]interface{}{"enabled": false}
+		} else {
+			stats["enabled"] = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(stats); err != nil {
+			logger.Error("Failed to encode tier stats: %v", err)
+		}
+	})
+
 	// Serve Static Files (embedded HTML)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {

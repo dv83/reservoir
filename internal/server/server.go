@@ -61,6 +61,19 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 	kvStore := store.NewStore(storeLimits)
 
+	// Tiered storage must be on before recovery, so a log larger than the
+	// memory budget is replayed by spilling instead of failing. The commit log
+	// is required: value files are not durable on their own and are rebuilt
+	// from it on every start.
+	if cfg.TieringEnabled {
+		if !cfg.CommitLogEnabled {
+			return nil, fmt.Errorf("tiered storage requires the commit log (--commit-log-enabled)")
+		}
+		if err := kvStore.EnableTiering(cfg.TieringDir, cfg.TieringFileSize); err != nil {
+			return nil, fmt.Errorf("failed to enable tiered storage: %v", err)
+		}
+	}
+
 	// Initialize commit log if enabled
 	if cfg.CommitLogEnabled {
 		commitLog, err := commitlog.NewCommitLog(cfg.CommitLogDir)
