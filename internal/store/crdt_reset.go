@@ -32,6 +32,7 @@ import (
 // resetPoint returns the stamp at or before which any write to key is obsolete.
 // The caller holds shard.mu.
 func (s *LockFreeStore) resetPoint(shard *LockFreeShard, key string) hlcStamp {
+	shard.ensure(key)
 	r := s.flushStampNow()
 	if tomb, ok := shard.tombstones[key]; ok && tomb.stamp.After(r) {
 		r = tomb.stamp
@@ -42,6 +43,7 @@ func (s *LockFreeStore) resetPoint(shard *LockFreeShard, key string) hlcStamp {
 // raiseTombstone records that key was reset at stamp, if that is newer than what
 // this node knows. The caller holds shard.mu.
 func raiseTombstone(shard *LockFreeShard, key string, stamp hlcStamp) {
+	shard.ensure(key)
 	if stamp.TS.IsZero() {
 		return
 	}
@@ -49,6 +51,7 @@ func raiseTombstone(shard *LockFreeShard, key string, stamp hlcStamp) {
 		return
 	}
 	shard.tombstones[key] = tombstone{stamp: stamp, deleted: time.Now()}
+	shard.markDirty(key)
 }
 
 func (s *LockFreeStore) flushStampNow() hlcStamp {
@@ -209,6 +212,7 @@ func (s *LockFreeStore) FlushLWW(physical int64, logical uint32, origin uint64) 
 	}
 	s.flushStamp = f
 	s.flushMu.Unlock()
+	s.persistFlushStamp(f)
 
 	var removedKeys []string
 	anyKept := false
@@ -224,12 +228,16 @@ func (s *LockFreeStore) FlushLWW(physical int64, logical uint32, origin uint64) 
 		// Tombstones and TTL records at or before the flush are covered by it.
 		for key, tomb := range shard.tombstones {
 			if !tomb.stamp.After(f) {
+				shard.ensure(key)
 				delete(shard.tombstones, key)
+				shard.markDirty(key)
 			}
 		}
 		for key, rec := range shard.ttlRecs {
 			if !rec.stamp.After(f) {
+				shard.ensure(key)
 				delete(shard.ttlRecs, key)
+				shard.markDirty(key)
 				// A key kept by the flush was written after it; a TTL set
 				// before the flush belonged to the flushed incarnation.
 				shard.expiryMu.Lock()

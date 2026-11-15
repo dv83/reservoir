@@ -213,16 +213,26 @@ func TestDecodedValueBehavesTheSame(t *testing.T) {
 			b.shards[i].put(key, dec)
 			b.shards[i].mu.Unlock()
 		}
-		// Side state the codec does not cover (persisted separately, task 3.1).
+		// Side state the value codec does not cover (the LSM record does),
+		// copied the way the store changes it: load, change, mark dirty.
+		bs := b.shards[i]
+		bs.mu.Lock()
 		for k, v := range shard.tombstones {
-			b.shards[i].tombstones[k] = v
+			bs.ensure(k)
+			bs.tombstones[k] = v
+			bs.markDirty(k)
 		}
 		for k, v := range shard.ttlRecs {
-			b.shards[i].ttlRecs[k] = v
+			bs.ensure(k)
+			bs.ttlRecs[k] = v
+			bs.markDirty(k)
 		}
 		for k, v := range shard.expiry {
-			b.shards[i].expiry[k] = v
+			bs.ensure(k)
+			bs.expiry[k] = v
+			bs.markDirty(k)
 		}
+		bs.mu.Unlock()
 		shard.mu.Unlock()
 	}
 	b.listSeq = a.listSeq

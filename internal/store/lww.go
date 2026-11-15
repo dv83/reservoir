@@ -84,6 +84,7 @@ func (s *LockFreeStore) SetWithHLC(key, value string, stamp hlcStamp) (bool, err
 	shard.put(keyCopy, newSV)
 	// This write supersedes any tombstone for the key.
 	delete(shard.tombstones, keyCopy)
+	shard.markDirty(keyCopy)
 
 	// A SET clears any previous TTL (Redis semantics) — unless a TTL op newer
 	// than this SET has been recorded, in which case that TTL stays in force.
@@ -140,6 +141,7 @@ func (s *LockFreeStore) DeleteWithHLC(key string, stamp hlcStamp) bool {
 		removed, _ = s.applyReset(shard, key, stamp)
 	}
 	shard.tombstones[key] = tombstone{stamp: stamp, deleted: time.Now()}
+	shard.markDirty(key)
 	shard.mu.Unlock()
 
 	if removed {
@@ -173,13 +175,17 @@ func (s *LockFreeStore) gcTombstones(retain time.Duration) int {
 		shard.mu.Lock()
 		for k, t := range shard.tombstones {
 			if t.deleted.Before(cutoff) {
+				shard.ensure(k)
 				delete(shard.tombstones, k)
+				shard.markDirty(k)
 				removed++
 			}
 		}
 		for k, r := range shard.ttlRecs {
 			if r.updated.Before(cutoff) {
+				shard.ensure(k)
 				delete(shard.ttlRecs, k)
+				shard.markDirty(k)
 			}
 		}
 		for k, v := range shard.data {

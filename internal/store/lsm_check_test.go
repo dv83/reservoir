@@ -68,10 +68,10 @@ func checkShardAgainstEngine(sh *LockFreeShard) {
 	}
 	// Once entries have been evicted, keys on disk but not in the cache are
 	// expected; until then the two must match exactly.
-	if atomic.LoadInt64(&s.evictions) == 0 {
-		for k := range onDisk {
-			if _, ok := sh.data[k]; !ok {
-				extra = append(extra, k)
+	if atomic.LoadInt64(&s.evictions) == 0 && !s.lsmStartedWarm {
+		for k, b := range onDisk {
+			if _, ok := sh.data[k]; !ok && len(b) > 1 && b[1]&recValue != 0 {
+				extra = append(extra, k) // a value on disk that the cache lost
 			}
 		}
 	}
@@ -81,12 +81,52 @@ func checkShardAgainstEngine(sh *LockFreeShard) {
 		panic(fmt.Sprintf("LSM check, shard %d: cached but not persisted %q; persisted but not cached %q", sh.idx, missing, extra))
 	}
 	for k, v := range sh.data {
-		dec, err := decodeValue(onDisk[k])
+		rec, err := decodeRecord(onDisk[k])
 		if err != nil {
 			panic(fmt.Sprintf("LSM check: %q does not decode: %v", k, err))
 		}
-		if want, got := normalize(v), normalize(dec); !reflect.DeepEqual(want, got) {
+		if rec.value == nil {
+			panic(fmt.Sprintf("LSM check: %q is cached but its record holds no value", k))
+		}
+		if want, got := normalize(v), normalize(rec.value); !reflect.DeepEqual(want, got) {
 			panic(fmt.Sprintf("LSM check: %q differs between cache and engine:\ncache  %v\nengine %v", k, want, got))
+		}
+	}
+	// Side state in RAM must match the records (it may be missing from RAM
+	// for keys that were never loaded, but never differ).
+	sh.expiryMu.RLock()
+	defer sh.expiryMu.RUnlock()
+	for k, b := range onDisk {
+		rec, err := decodeRecord(b)
+		if err != nil {
+			panic(fmt.Sprintf("LSM check: %q does not decode: %v", k, err))
+		}
+		_, cached := sh.data[k]
+		if t, ok := sh.tombstones[k]; ok && (rec.tomb == nil || rec.tomb.stamp != t.stamp) {
+			panic(fmt.Sprintf("LSM check: %q tombstone %v in RAM, %v on disk", k, t.stamp, rec.tomb))
+		}
+		if cached && (rec.tomb == nil) != (func() bool { _, ok := sh.tombstones[k]; return !ok })() {
+			panic(fmt.Sprintf("LSM check: %q tombstone on disk %v but not in RAM", k, rec.tomb))
+		}
+		if r, ok := sh.ttlRecs[k]; ok && (rec.ttl == nil || rec.ttl.stamp != r.stamp || rec.ttl.deadline != r.deadline) {
+			panic(fmt.Sprintf("LSM check: %q TTL register %+v in RAM, %+v on disk", k, r, rec.ttl))
+		}
+		if cached {
+			d, has := sh.expiry[k]
+			if has != (rec.deadline != 0) || (has && d.UnixNano() != rec.deadline) {
+				panic(fmt.Sprintf("LSM check: %q deadline %v (has %v) in RAM, %d on disk", k, d, has, rec.deadline))
+			}
+		}
+	}
+	// A key with side state but no value must have a record too.
+	for k := range sh.tombstones {
+		if _, ok := onDisk[k]; !ok {
+			panic(fmt.Sprintf("LSM check: tombstone of %q not persisted", k))
+		}
+	}
+	for k := range sh.ttlRecs {
+		if _, ok := onDisk[k]; !ok {
+			panic(fmt.Sprintf("LSM check: TTL register of %q not persisted", k))
 		}
 	}
 }

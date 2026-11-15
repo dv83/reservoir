@@ -68,6 +68,7 @@ type LockFreeShard struct {
 	idx     byte
 	wlocked bool
 	dirty   map[string]struct{}
+	loaded  map[string]struct{} // records loaded in the current write-lock section
 }
 
 // tombstone marks a key as deleted at a given LWW stamp, retained until GC.
@@ -125,7 +126,9 @@ type LockFreeStore struct {
 	evictMu   sync.Mutex
 	evictHand int
 	evictions int64
-	_         [16]byte // padding до cache line boundary
+	// lsmStartedWarm: the engine held keys at start, so the cache is partial.
+	lsmStartedWarm bool
+	_              [16]byte // padding до cache line boundary
 }
 
 // SetLocalOrigin records this node's origin id so INCR/DECR maintain the PN
@@ -450,6 +453,9 @@ func (s *LockFreeStore) deleteExpiredAsync(shard *LockFreeShard, key string) {
 		recordExpiryTombstone(shard, key, oldValue, time.Time{})
 		shard.del(key)
 	}
+	shard.expiryMu.Lock()
+	delete(shard.expiry, key)
+	shard.expiryMu.Unlock()
 	shard.mu.Unlock()
 	if existed {
 		keyLen := int64(len(key))
@@ -461,9 +467,6 @@ func (s *LockFreeStore) deleteExpiredAsync(shard *LockFreeShard, key string) {
 		}
 		s.asyncMetrics.AddKeyUpdate(shardIdx, -1)
 	}
-	shard.expiryMu.Lock()
-	delete(shard.expiry, key)
-	shard.expiryMu.Unlock()
 }
 
 // removeExpiryAsync - DEPRECATED: replaced by batch processor
@@ -475,10 +478,15 @@ func (s *LockFreeStore) removeExpiryAsync(shard *LockFreeShard, key string) {
 		return
 	}
 
-	// Direct fallback if batch processor not available
+	// Direct fallback if batch processor not available (under the shard write
+	// lock, so LSM mode persists the change)
+	shard.mu.Lock()
+	shard.get(key)
 	shard.expiryMu.Lock()
 	delete(shard.expiry, key)
 	shard.expiryMu.Unlock()
+	shard.markDirty(key)
+	shard.mu.Unlock()
 }
 
 // SetWithExpiry - встановлення значення з TTL
@@ -492,9 +500,14 @@ func (s *LockFreeStore) SetWithExpiry(key, value string, ttl time.Duration) erro
 	shard := s.getShardFast(key)
 	expireTime := time.Now().Add(ttl)
 
+	// Under the shard write lock, so LSM mode persists the deadline.
+	shard.mu.Lock()
+	shard.get(key)
 	shard.expiryMu.Lock()
 	shard.expiry[key] = expireTime
 	shard.expiryMu.Unlock()
+	shard.markDirty(key)
+	shard.mu.Unlock()
 
 	return nil
 }
@@ -578,15 +591,20 @@ func (s *LockFreeStore) SetExpiry(key string, expireTime time.Time) bool {
 	s.expireIfNeeded(key)
 	shard := s.getShard(key)
 
-	// Check if key exists in the store
-	shard.mu.RLock()
+	// Check the key exists and set the deadline under the shard write lock, so
+	// in LSM mode the key's record is persisted with it (lock order: shard,
+	// then expiry).
+	shard.mu.Lock()
 	_, exists := shard.get(key)
-	shard.mu.RUnlock()
-
 	if exists {
 		shard.expiryMu.Lock()
 		shard.expiry[key] = expireTime
 		shard.expiryMu.Unlock()
+		shard.markDirty(key)
+	}
+	shard.mu.Unlock()
+
+	if exists {
 		// Persist the TTL as an absolute deadline so it survives a restart.
 		s.logToCommitLog("EXPIRE", []byte(key), []byte(strconv.FormatInt(expireTime.UnixNano(), 10)))
 		return true
@@ -598,6 +616,13 @@ func (s *LockFreeStore) SetExpiry(key string, expireTime time.Time) bool {
 func (s *LockFreeStore) GetTTL(key string) (time.Duration, bool) {
 	s.expireIfNeeded(key)
 	shard := s.getShardFast(key)
+	if s.engine != nil {
+		// LSM mode: an uncached key's deadline is in its record; a read-lock
+		// load puts it in the expiry map.
+		shard.mu.RLock()
+		shard.get(key)
+		shard.mu.RUnlock()
+	}
 
 	shard.expiryMu.RLock()
 	expireTime, exists := shard.expiry[key]
@@ -620,16 +645,25 @@ func (s *LockFreeStore) RemoveExpiry(key string) bool {
 	s.expireIfNeeded(key)
 	shard := s.getShardFast(key)
 
+	// Under the shard write lock (then the expiry lock), after loading the
+	// key, so in LSM mode the change is persisted with the key's record.
+	shard.mu.Lock()
+	shard.get(key)
 	shard.expiryMu.Lock()
-	defer shard.expiryMu.Unlock()
-
-	// Check if key exists and has expiry
-	if _, exists := shard.expiry[key]; exists {
+	_, exists := shard.expiry[key]
+	if exists {
 		delete(shard.expiry, key)
-		s.logToCommitLog("PERSIST", []byte(key), nil)
-		return true
 	}
-	return false
+	shard.expiryMu.Unlock()
+	if exists {
+		shard.markDirty(key)
+	}
+	shard.mu.Unlock()
+
+	if exists {
+		s.logToCommitLog("PERSIST", []byte(key), nil)
+	}
+	return exists
 }
 
 // --- Canonical accounting helpers ---

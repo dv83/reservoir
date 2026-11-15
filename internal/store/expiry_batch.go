@@ -153,9 +153,14 @@ func (ebp *ExpiryBatchProcessor) flushBatch() {
 
 // removeExpiryDirect removes key from expiry map directly
 func (ebp *ExpiryBatchProcessor) removeExpiryDirect(shard *LockFreeShard, key string) {
+	// Under the shard write lock, so LSM mode persists the change.
+	shard.mu.Lock()
+	shard.get(key)
 	shard.expiryMu.Lock()
 	delete(shard.expiry, key)
 	shard.expiryMu.Unlock()
+	shard.markDirty(key)
+	shard.mu.Unlock()
 }
 
 // deleteExpiredDirect reclaims a key the cleaner queued as expired; see

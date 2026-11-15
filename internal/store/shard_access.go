@@ -15,6 +15,12 @@ func (sh *LockFreeShard) get(key string) (*StoredValue, bool) {
 		return v, ok
 	}
 	if !ok {
+		if sh.wlocked {
+			if _, done := sh.loaded[key]; done {
+				return nil, false
+			}
+			sh.loaded[key] = struct{}{}
+		}
 		v, ok = sh.load(key)
 		if !ok {
 			return nil, false
@@ -38,6 +44,7 @@ func (sh *LockFreeShard) getV(key string) *StoredValue {
 
 // put stores v under key. The caller holds the shard write lock.
 func (sh *LockFreeShard) put(key string, v *StoredValue) {
+	sh.ensure(key)
 	sh.data[key] = v
 	if sh.dirty != nil {
 		sh.dirty[key] = struct{}{}
@@ -46,8 +53,20 @@ func (sh *LockFreeShard) put(key string, v *StoredValue) {
 
 // del removes key. The caller holds the shard write lock.
 func (sh *LockFreeShard) del(key string) {
+	sh.ensure(key)
 	delete(sh.data, key)
 	if sh.dirty != nil {
+		sh.dirty[key] = struct{}{}
+	}
+}
+
+// markDirty records that key's side state (tombstone, TTL register or TTL
+// deadline) changed, so the next write-unlock persists the key's record. The
+// key's record must have been loaded before the change (get, ensure or
+// resetPoint): loading it afterwards would bring back what the change
+// removed. The caller holds the shard write lock.
+func (sh *LockFreeShard) markDirty(key string) {
+	if sh.dirty != nil && sh.wlocked {
 		sh.dirty[key] = struct{}{}
 	}
 }

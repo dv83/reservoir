@@ -12,7 +12,7 @@
 
 ## 3. Engine-backed scans and side state
 
-- [ ] 3.1 Persist tombstones, TTL registers, the flush stamp and generations
+- [x] 3.1 Persist tombstones, TTL registers, the flush stamp and generations
 - [ ] 3.2 Expiry index and an engine-backed reaper
 - [ ] 3.3 Anti-entropy digests, KEYS, FLUSHALL, GC and stats from engine scans
 

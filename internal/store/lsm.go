@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"reservoir/internal/lsmengine"
 	"reservoir/pkg/logger"
@@ -24,7 +25,29 @@ import (
 //
 // Engine keys are kind | shard | user key; kind 'v' holds the encoded value.
 
-const lsmKindValue = 'v'
+const (
+	lsmKindValue  = 'v'
+	lsmKindGlobal = 'g'
+)
+
+// flushStampKey holds the newest stamped FLUSHALL, the reset point floor of
+// every key.
+var flushStampKey = []byte{lsmKindGlobal, 'f'}
+
+// persistFlushStamp stores the flush stamp, so a restarted node still rejects
+// stale re-deliveries of flushed data. A no-op in memory mode.
+func (s *LockFreeStore) persistFlushStamp(f hlcStamp) {
+	if s.engine == nil {
+		return
+	}
+	e := &encoder{}
+	e.stamp(f)
+	b := s.engine.NewBatch()
+	b.Set(flushStampKey, e.b)
+	if err := s.engine.Commit(b); err != nil {
+		logger.Error("LSM storage: cannot persist the flush stamp: %v", err)
+	}
+}
 
 func valueKey(shard byte, key string) []byte {
 	b := make([]byte, 0, 2+len(key))
@@ -54,11 +77,26 @@ func (m *shardMutex) TryLock() bool {
 
 func (m *shardMutex) Unlock() {
 	sh := m.sh
-	if len(sh.dirty) > 0 {
-		sh.owner.flushShard(sh)
+	if len(sh.dirty) > 0 || len(sh.loaded) > 0 {
+		m.unlockFlush()
+		return
 	}
 	sh.wlocked = false
 	m.RWMutex.Unlock()
+}
+
+// unlockFlush persists the dirty keys, then releases the lock even if the
+// flush panics, so one failure cannot leave the shard locked.
+func (m *shardMutex) unlockFlush() {
+	sh := m.sh
+	defer func() {
+		clear(sh.loaded)
+		sh.wlocked = false
+		m.RWMutex.Unlock()
+	}()
+	if len(sh.dirty) > 0 {
+		sh.owner.flushShard(sh)
+	}
 }
 
 // EnableLSM switches the store to LSM storage mode with the engine in dir. It
@@ -77,18 +115,35 @@ func (s *LockFreeStore) EnableLSM(dir string, opts lsmengine.Options) error {
 	s.engine = eng
 	for _, sh := range s.shards {
 		sh.dirty = make(map[string]struct{})
+		sh.loaded = make(map[string]struct{})
 	}
 	// Key counts cover every key on disk, not only the cached ones.
 	var total int64
 	for _, sh := range s.shards {
 		var n int64
-		if err := eng.ScanPrefix([]byte{lsmKindValue, sh.idx}, func(_, _ []byte) bool { n++; return true }); err != nil {
+		if err := eng.ScanPrefix([]byte{lsmKindValue, sh.idx}, func(_, v []byte) bool {
+			if len(v) > 1 && v[1]&recValue != 0 {
+				n++
+			}
+			return true
+		}); err != nil {
 			return err
 		}
 		sh.keyCount = n
 		total += n
 	}
 	s.totalKeys = total
+	s.lsmStartedWarm = total > 0
+	if b, ok, err := eng.Get(flushStampKey); err != nil {
+		return err
+	} else if ok {
+		d := &decoder{b: b}
+		f := d.stamp()
+		if d.err != nil {
+			return fmt.Errorf("LSM storage: corrupt flush stamp")
+		}
+		s.flushStamp = f
+	}
 	logger.Info("LSM storage enabled in %s (%d keys on disk)", dir, total)
 	return nil
 }
@@ -96,9 +151,131 @@ func (s *LockFreeStore) EnableLSM(dir string, opts lsmengine.Options) error {
 // LSMEnabled reports whether the store runs in LSM storage mode.
 func (s *LockFreeStore) LSMEnabled() bool { return s.engine != nil }
 
-// load reads key from the engine. Under the write lock the value is cached and
-// its memory accounted as cache memory (the key was already counted). The
-// caller holds the shard lock.
+// keyRecord is what the engine stores per key: the value (if any) and the
+// key's side state — tombstone, TTL register and TTL deadline — so all of it
+// survives eviction and restart together.
+type keyRecord struct {
+	value    *StoredValue
+	tomb     *tombstone
+	ttl      *ttlRec
+	deadline int64 // unix nanos; 0 = none
+}
+
+const (
+	recValue    = 1 << 0
+	recTomb     = 1 << 1
+	recTTL      = 1 << 2
+	recDeadline = 1 << 3
+	recVersion  = 1
+)
+
+func encodeRecord(r keyRecord) ([]byte, error) {
+	e := &encoder{}
+	var flags byte
+	if r.value != nil {
+		flags |= recValue
+	}
+	if r.tomb != nil {
+		flags |= recTomb
+	}
+	if r.ttl != nil {
+		flags |= recTTL
+	}
+	if r.deadline != 0 {
+		flags |= recDeadline
+	}
+	e.byte(recVersion)
+	e.byte(flags)
+	if r.value != nil {
+		v, err := encodeValue(r.value)
+		if err != nil {
+			return nil, err
+		}
+		e.u(uint64(len(v)))
+		e.b = append(e.b, v...)
+	}
+	if r.tomb != nil {
+		e.stamp(r.tomb.stamp)
+		e.i(r.tomb.deleted.UnixNano())
+	}
+	if r.ttl != nil {
+		e.stamp(r.ttl.stamp)
+		e.i(r.ttl.deadline)
+		e.i(r.ttl.updated.UnixNano())
+	}
+	if r.deadline != 0 {
+		e.i(r.deadline)
+	}
+	return e.b, nil
+}
+
+func decodeRecord(b []byte) (keyRecord, error) {
+	var r keyRecord
+	d := &decoder{b: b}
+	if v := d.byte(); v != recVersion {
+		return r, fmt.Errorf("LSM record: unsupported version %d", v)
+	}
+	flags := d.byte()
+	if flags&recValue != 0 {
+		n := d.u()
+		if d.err != nil || n > uint64(len(d.b)) {
+			return r, errCodec
+		}
+		v, err := decodeValue(d.b[:n])
+		if err != nil {
+			return r, err
+		}
+		d.b = d.b[n:]
+		r.value = v
+	}
+	if flags&recTomb != 0 {
+		st := d.stamp()
+		r.tomb = &tombstone{stamp: st, deleted: time.Unix(0, d.i())}
+	}
+	if flags&recTTL != 0 {
+		st := d.stamp()
+		dl := d.i()
+		r.ttl = &ttlRec{stamp: st, deadline: dl, updated: time.Unix(0, d.i())}
+	}
+	if flags&recDeadline != 0 {
+		r.deadline = d.i()
+	}
+	if d.err == nil && len(d.b) != 0 {
+		d.fail()
+	}
+	return r, d.err
+}
+
+// ensure loads key's record into the shard's maps, once per write-lock
+// section, before anything about the key is read or changed: a flush rebuilds
+// the record from the maps, so changing the side state of a key whose value
+// is only on disk would otherwise drop the value. A no-op in memory mode,
+// under a read lock, and for cached keys.
+func (sh *LockFreeShard) ensure(key string) {
+	if sh.dirty == nil || !sh.wlocked {
+		return
+	}
+	if _, ok := sh.data[key]; ok {
+		return
+	}
+	if _, ok := sh.loaded[key]; ok {
+		return
+	}
+	sh.loaded[key] = struct{}{}
+	sh.load(key)
+}
+
+// load reads key's record from the engine and returns its value.
+//
+// Under the write lock the whole record is cached: the value (its memory
+// accounted as cache memory — the key itself was already counted), tombstone,
+// TTL register and deadline. A value whose deadline has passed is reclaimed on
+// the spot, exactly as the reaper would (expiry tombstone, key count), and
+// reported missing.
+//
+// Under a read lock only the deadline is cached (the expiry map has its own
+// lock), so TTL reads see it; the value is returned as an uncached copy, or as
+// missing if it has expired. The caller holds the shard lock.
 func (sh *LockFreeShard) load(key string) (*StoredValue, bool) {
 	s := sh.owner
 	b, ok, err := s.engine.Get(valueKey(sh.idx, key))
@@ -109,18 +286,53 @@ func (sh *LockFreeShard) load(key string) (*StoredValue, bool) {
 	if !ok {
 		return nil, false
 	}
-	v, err := decodeValue(b)
+	rec, err := decodeRecord(b)
 	if err != nil {
-		logger.Error("LSM storage: value of %q is corrupt: %v", key, err)
+		logger.Error("LSM storage: record of %q is corrupt: %v", key, err)
 		return nil, false
 	}
-	if sh.wlocked {
-		sh.data[key] = v
-		s.accountMemoryDelta(sh, v.MemoryUsage())
-	} else {
-		v.touched = touchedUncached
+	expired := rec.value != nil && rec.deadline != 0 && time.Now().UnixNano() > rec.deadline
+
+	if !sh.wlocked {
+		// Cache the deadline even when it has passed: the next expiry check
+		// or reaper pass then reclaims the key under the write lock.
+		if rec.deadline != 0 && rec.value != nil {
+			sh.expiryMu.Lock()
+			sh.expiry[key] = time.Unix(0, rec.deadline)
+			sh.expiryMu.Unlock()
+		}
+		if rec.value == nil || expired {
+			return nil, false
+		}
+		rec.value.touched = touchedUncached
+		return rec.value, true
 	}
-	return v, true
+
+	if rec.tomb != nil {
+		sh.tombstones[key] = *rec.tomb
+	}
+	if rec.ttl != nil {
+		sh.ttlRecs[key] = *rec.ttl
+	}
+	if expired {
+		// Reclaim, as reapExpired does: the key was counted on disk.
+		recordExpiryTombstone(sh, key, rec.value, time.Unix(0, rec.deadline))
+		sh.dirty[key] = struct{}{}
+		atomic.AddInt64(&sh.keyCount, -1)
+		atomic.AddInt64(&s.totalKeys, -1)
+		return nil, false
+	}
+	if rec.deadline != 0 {
+		sh.expiryMu.Lock()
+		sh.expiry[key] = time.Unix(0, rec.deadline)
+		sh.expiryMu.Unlock()
+	}
+	if rec.value == nil {
+		return nil, false
+	}
+	sh.data[key] = rec.value
+	s.accountMemoryDelta(sh, rec.value.MemoryUsage())
+	return rec.value, true
 }
 
 // touchedUncached marks a value loaded under a read lock: a copy that is not in
@@ -203,6 +415,12 @@ func (s *LockFreeStore) evictShard(sh *LockFreeShard, need int64) int64 {
 		}
 		mem := v.MemoryUsage()
 		delete(sh.data, key)
+		// The record on disk holds the key's side state too.
+		delete(sh.tombstones, key)
+		delete(sh.ttlRecs, key)
+		sh.expiryMu.Lock()
+		delete(sh.expiry, key)
+		sh.expiryMu.Unlock()
 		s.accountMemoryDelta(sh, -mem)
 		freed += mem
 		atomic.AddInt64(&s.evictions, 1)
@@ -210,22 +428,38 @@ func (s *LockFreeStore) evictShard(sh *LockFreeShard, need int64) int64 {
 	return freed
 }
 
-// flushShard commits the dirty keys of a shard to the engine. The caller holds
-// the shard write lock.
+// flushShard commits the dirty keys' records to the engine — the value and
+// side state as the shard's maps now hold them, or a delete when nothing is
+// left. The caller holds the shard write lock.
 func (s *LockFreeStore) flushShard(sh *LockFreeShard) {
 	b := s.engine.NewBatch()
+	sh.expiryMu.RLock()
 	for key := range sh.dirty {
+		var r keyRecord
 		if v, ok := sh.data[key]; ok && v != nil {
-			enc, err := encodeValue(v)
-			if err != nil {
-				logger.Error("LSM storage: cannot encode %q: %v", key, err)
-				continue
-			}
-			b.Set(valueKey(sh.idx, key), enc)
-		} else {
-			b.Delete(valueKey(sh.idx, key))
+			r.value = v
 		}
+		if t, ok := sh.tombstones[key]; ok {
+			r.tomb = &t
+		}
+		if t, ok := sh.ttlRecs[key]; ok {
+			r.ttl = &t
+		}
+		if d, ok := sh.expiry[key]; ok && r.value != nil {
+			r.deadline = d.UnixNano()
+		}
+		if r.value == nil && r.tomb == nil && r.ttl == nil {
+			b.Delete(valueKey(sh.idx, key))
+			continue
+		}
+		enc, err := encodeRecord(r)
+		if err != nil {
+			logger.Error("LSM storage: cannot encode %q: %v", key, err)
+			continue
+		}
+		b.Set(valueKey(sh.idx, key), enc)
 	}
+	sh.expiryMu.RUnlock()
 	if err := s.engine.Commit(b); err != nil {
 		logger.Error("LSM storage: commit failed: %v", err)
 	}

@@ -21,6 +21,7 @@ func (s *LockFreeStore) ExpireLWW(key string, deadline int64, physical int64, lo
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
+	shard.ensure(key)
 	if rec, ok := shard.ttlRecs[key]; ok && !stamp.After(rec.stamp) {
 		return false // a newer TTL op already won
 	}
@@ -30,6 +31,7 @@ func (s *LockFreeStore) ExpireLWW(key string, deadline int64, physical int64, lo
 	}
 
 	shard.ttlRecs[key] = ttlRec{stamp: stamp, deadline: deadline, updated: time.Now()}
+	shard.markDirty(key)
 	if !present {
 		return false
 	}
@@ -55,6 +57,7 @@ func (s *LockFreeStore) ExpireLWW(key string, deadline int64, physical int64, lo
 // SET clears the TTL (Redis semantics) and supersedes the record. The caller
 // holds shard.mu.
 func (s *LockFreeStore) applyTTLAfterSet(shard *LockFreeShard, key string, stamp hlcStamp) {
+	shard.ensure(key)
 	shard.expiryMu.Lock()
 	defer shard.expiryMu.Unlock()
 
@@ -67,6 +70,7 @@ func (s *LockFreeStore) applyTTLAfterSet(shard *LockFreeShard, key string, stamp
 		return
 	}
 	delete(shard.ttlRecs, key)
+	shard.markDirty(key)
 	delete(shard.expiry, key)
 }
 
@@ -98,4 +102,5 @@ func recordExpiryTombstone(shard *LockFreeShard, key string, old *StoredValue, d
 		return
 	}
 	shard.tombstones[key] = tombstone{stamp: old.hlc, deleted: time.Now()}
+	shard.markDirty(key)
 }
