@@ -54,6 +54,27 @@ func NewDequeWithElements(elements []string) *Deque {
 	return d
 }
 
+// newDequeWithCapacity is NewDequeWithElements with an explicit capacity (at
+// least len(elements)), so a list decoded from disk has the same capacity — and
+// therefore the same accounted memory — as the one that was encoded.
+func newDequeWithCapacity(elements []string, capacity int) *Deque {
+	if capacity < len(elements) || capacity <= 0 {
+		return NewDequeWithElements(elements)
+	}
+	var contentSize int64
+	for _, elem := range elements {
+		contentSize += int64(len(elem))
+	}
+	d := &Deque{
+		data:        make([]string, capacity),
+		tail:        len(elements) % capacity,
+		count:       len(elements),
+		contentSize: contentSize,
+	}
+	copy(d.data, elements)
+	return d
+}
+
 // Len returns the number of elements
 func (d *Deque) Len() int {
 	return d.count
