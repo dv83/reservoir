@@ -360,8 +360,20 @@ func (cmd *ZeroCopyCommand) String() string {
 	return unsafeString(cmd.Command)
 }
 
-// ArgString returns string representation of argument (with allocation)
+// ArgString returns a copy of the argument. The arguments alias the parser's
+// read buffer, which is reused for the next command on the connection, so a
+// string the store keeps — a key, member, field or value — must be a copy.
 func (cmd *ZeroCopyCommand) ArgString(index int) string {
+	if index < 0 || index >= len(cmd.Args) {
+		return ""
+	}
+	return string(cmd.Args[index])
+}
+
+// ArgStringRef returns the argument without copying. The string aliases the
+// read buffer and is valid only while the command is being handled: use it
+// only for lookups that never store it (GET's key).
+func (cmd *ZeroCopyCommand) ArgStringRef(index int) string {
 	if index < 0 || index >= len(cmd.Args) {
 		return ""
 	}
@@ -446,12 +458,13 @@ func ParseSetCommand(cmd *ZeroCopyCommand) (*ZeroCopySetCommand, error) {
 	}, nil
 }
 
-// KeyString returns key as string (with allocation)
+// KeyString returns the key without copying: it aliases the read buffer, so
+// it must not be stored (the store copies SET's key and value itself).
 func (sc *ZeroCopySetCommand) KeyString() string {
 	return unsafeString(sc.Key)
 }
 
-// ValueString returns value as string (with allocation)
+// ValueString returns the value without copying; see KeyString.
 func (sc *ZeroCopySetCommand) ValueString() string {
 	return unsafeString(sc.Value)
 }
@@ -476,7 +489,7 @@ func ParseGetCommand(cmd *ZeroCopyCommand) (*ZeroCopyGetCommand, error) {
 	}, nil
 }
 
-// KeyString returns key as string (with allocation)
+// KeyString returns the key without copying, for lookups only.
 func (gc *ZeroCopyGetCommand) KeyString() string {
 	return unsafeString(gc.Key)
 }
@@ -501,9 +514,9 @@ func ParseDelCommand(cmd *ZeroCopyCommand) (*ZeroCopyDelCommand, error) {
 	}, nil
 }
 
-// KeyString returns key as string (with allocation)
+// KeyString returns a copy of the key (a delete may store it in a tombstone).
 func (dc *ZeroCopyDelCommand) KeyString() string {
-	return unsafeString(dc.Key)
+	return string(dc.Key)
 }
 
 // ZeroCopyMSetCommand represents a parsed MSET command
@@ -539,10 +552,10 @@ func (mc *ZeroCopyMSetCommand) GetPair(index int) (key, value []byte) {
 	return mc.Pairs[index*2], mc.Pairs[index*2+1]
 }
 
-// GetPairStrings returns key-value pair as strings (with allocation)
+// GetPairStrings returns copies of a key-value pair.
 func (mc *ZeroCopyMSetCommand) GetPairStrings(index int) (key, value string) {
 	k, v := mc.GetPair(index)
-	return unsafeString(k), unsafeString(v)
+	return string(k), string(v)
 }
 
 // ZeroCopyMGetCommand represents a parsed MGET command
@@ -578,7 +591,7 @@ func (mc *ZeroCopyMGetCommand) GetKey(index int) []byte {
 	return mc.Keys[index]
 }
 
-// GetKeyString returns key as string (with allocation)
+// GetKeyString returns a key without copying, for lookups only.
 func (mc *ZeroCopyMGetCommand) GetKeyString(index int) string {
 	return unsafeString(mc.GetKey(index))
 }
@@ -605,9 +618,9 @@ func ParseExpireCommand(cmd *ZeroCopyCommand) (*ZeroCopyExpireCommand, error) {
 	}, nil
 }
 
-// KeyString returns key as string (with allocation)
+// KeyString returns a copy of the key (the expiry map stores it).
 func (ec *ZeroCopyExpireCommand) KeyString() string {
-	return unsafeString(ec.Key)
+	return string(ec.Key)
 }
 
 // SecondsString returns seconds as string (with allocation)

@@ -21,8 +21,9 @@ func HandleZeroCopyGet(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, wri
 		return writeError(writer, "wrong number of arguments for 'get' command")
 	}
 
-	// OPTIMIZED: Direct key access with efficient template expansion
-	key := expandRandomTemplates(cmd.ArgString(0))
+	// Lookup only, so the zero-copy key is fine: it is never stored (an
+	// LSM-mode load copies it itself).
+	key := expandRandomTemplates(cmd.ArgStringRef(0))
 
 	// Use GetStoredValue so we can honor TTL (expired keys are treated as
 	// absent) and distinguish a wrong-type key (list/set/hash) from a missing
