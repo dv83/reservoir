@@ -574,3 +574,143 @@ func (s *LockFreeStore) reapExpiryIndex(now time.Time, max int) int {
 	atomic.AddInt64(&s.lsmReaped, int64(len(batch)))
 	return len(batch)
 }
+
+// shardView is everything a scan of one shard needs: values, tombstones, TTL
+// registers and deadlines. In memory mode it is the shard's own maps. In LSM
+// mode it merges the cache with the engine's records — cached state wins, as
+// it is the same or newer — without filling the cache, so a scan does not push
+// the whole shard through it. It holds one shard (1/256 of the data) while a
+// scan runs; whole-shard digests are O(shard) anyway.
+type shardView struct {
+	data       map[string]*StoredValue
+	tombstones map[string]tombstone
+	ttlRecs    map[string]ttlRec
+	deadlines  map[string]int64 // LSM mode only; memory mode uses the expiry map
+}
+
+// view returns the shard's view. The caller holds the shard lock and must not
+// mutate the maps through it.
+func (s *LockFreeStore) view(sh *LockFreeShard) shardView {
+	if s.engine == nil {
+		return shardView{data: sh.data, tombstones: sh.tombstones, ttlRecs: sh.ttlRecs}
+	}
+	v := shardView{
+		data:       make(map[string]*StoredValue, len(sh.data)),
+		tombstones: make(map[string]tombstone, len(sh.tombstones)),
+		ttlRecs:    make(map[string]ttlRec, len(sh.ttlRecs)),
+		deadlines:  make(map[string]int64),
+	}
+	for k, x := range sh.data {
+		v.data[k] = x
+	}
+	for k, x := range sh.tombstones {
+		v.tombstones[k] = x
+	}
+	for k, x := range sh.ttlRecs {
+		v.ttlRecs[k] = x
+	}
+	sh.expiryMu.RLock()
+	for k, d := range sh.expiry {
+		v.deadlines[k] = d.UnixNano()
+	}
+	sh.expiryMu.RUnlock()
+	err := s.engine.ScanPrefix([]byte{lsmKindValue, sh.idx}, func(ek, b []byte) bool {
+		key := string(ek[2:])
+		_, cached := sh.data[key]
+		rec, err := decodeRecord(b)
+		if err != nil {
+			logger.Error("LSM storage: record of %q is corrupt: %v", key, err)
+			return true
+		}
+		if rec.value != nil && !cached {
+			v.data[key] = rec.value
+		}
+		if _, ok := v.tombstones[key]; !ok && rec.tomb != nil {
+			v.tombstones[key] = *rec.tomb
+		}
+		if _, ok := v.ttlRecs[key]; !ok && rec.ttl != nil {
+			v.ttlRecs[key] = *rec.ttl
+		}
+		if _, ok := v.deadlines[key]; !ok && rec.deadline != 0 && !cached {
+			v.deadlines[key] = rec.deadline
+		}
+		return true
+	})
+	if err != nil {
+		logger.Error("LSM storage: shard %d scan failed: %v", sh.idx, err)
+	}
+	return v
+}
+
+// expired reports whether key's deadline has passed.
+func (v shardView) expired(s *LockFreeStore, sh *LockFreeShard, key string) bool {
+	if v.deadlines == nil {
+		return s.isExpiredFast(sh, key)
+	}
+	d := v.deadlines[key]
+	return d != 0 && time.Now().UnixNano() > d
+}
+
+// hasDeadline reports whether key has a TTL.
+func (v shardView) hasDeadline(sh *LockFreeShard, key string) bool {
+	if v.deadlines == nil {
+		sh.expiryMu.RLock()
+		_, ok := sh.expiry[key]
+		sh.expiryMu.RUnlock()
+		return ok
+	}
+	return v.deadlines[key] != 0
+}
+
+// ensureWhere loads into the cache every record of the shard for which want
+// returns true (all records if want is nil), for scans that change keys. The
+// caller holds the shard write lock. A no-op in memory mode.
+func (sh *LockFreeShard) ensureWhere(want func(record []byte) bool) {
+	s := sh.owner
+	if s.engine == nil || !sh.wlocked {
+		return
+	}
+	var keys []string
+	err := s.engine.ScanPrefix([]byte{lsmKindValue, sh.idx}, func(ek, b []byte) bool {
+		if want == nil || want(b) {
+			keys = append(keys, string(ek[2:]))
+		}
+		return true
+	})
+	if err != nil {
+		logger.Error("LSM storage: shard %d scan failed: %v", sh.idx, err)
+	}
+	for _, k := range keys {
+		sh.ensure(k)
+	}
+}
+
+// recordHasGCState reports, from a record's header alone, whether tombstone GC
+// may change it: it holds a key tombstone or TTL register, or a container
+// (whose element tombstones age out).
+func recordHasGCState(b []byte) bool {
+	if len(b) < 2 {
+		return false
+	}
+	flags := b[1]
+	if flags&(recTomb|recTTL) != 0 {
+		return true
+	}
+	if flags&recValue == 0 {
+		return false
+	}
+	n, w := binary.Uvarint(b[2:])
+	if w <= 0 || n < 2 || uint64(len(b)-2-w) < n {
+		return false
+	}
+	switch ValueType(b[2+w+1]) { // value encoding: version, then type
+	case ValueTypeSet, ValueTypeHash, ValueTypeList:
+		return true
+	}
+	return false
+}
+
+// lsmGCShardsPerPass is how many shards one tombstone-GC pass covers in LSM
+// mode, where each needs an engine scan: with GC every minute a full cycle
+// takes about half an hour, so tombstones live one to one and a half hours.
+const lsmGCShardsPerPass = 8

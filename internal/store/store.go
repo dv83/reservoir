@@ -132,6 +132,7 @@ type LockFreeStore struct {
 	lsmStop   chan struct{}
 	lsmDone   chan struct{}
 	lsmReaped int64
+	gcHand    int      // next shard for LSM-mode tombstone GC
 	_         [16]byte // padding до cache line boundary
 }
 
@@ -319,10 +320,11 @@ func (s *LockFreeStore) GetMemoryMap() ([]KeyMemoryInfo, error) {
 	for i := 0; i < numShards; i++ {
 		shard := s.shards[i]
 		shard.mu.RLock()
+		view := s.view(shard)
 
-		for key, val := range shard.data {
+		for key, val := range view.data {
 			// Check if expired (optimistic check)
-			if s.isExpiredFast(shard, key) {
+			if view.expired(s, shard, key) {
 				continue
 			}
 
@@ -330,9 +332,7 @@ func (s *LockFreeStore) GetMemoryMap() ([]KeyMemoryInfo, error) {
 			size := val.MemoryUsage() + int64(len(key))
 
 			// Check if key has TTL
-			shard.expiryMu.RLock()
-			_, hasTTL := shard.expiry[key]
-			shard.expiryMu.RUnlock()
+			hasTTL := view.hasDeadline(shard, key)
 
 			info := KeyMemoryInfo{
 				Key:      key,
@@ -746,9 +746,10 @@ func (s *LockFreeStore) GetAllKeys() []string {
 	for i := 0; i < numShards; i++ {
 		shard := s.shards[i]
 		shard.mu.RLock()
-		for key := range shard.data {
+		view := s.view(shard)
+		for key := range view.data {
 			// Skip expired keys that the cleaner has not physically removed yet.
-			if !s.isExpiredFast(shard, key) {
+			if !view.expired(s, shard, key) {
 				keys = append(keys, key)
 			}
 		}
@@ -1053,11 +1054,12 @@ func (s *LockFreeStore) GetKeysByShards() map[int][]string {
 	for i := 0; i < numShards; i++ {
 		shard := s.shards[i]
 		shard.mu.RLock()
+		view := s.view(shard)
 
 		var keys []string
-		for key := range shard.data {
+		for key := range view.data {
 			// Check if not expired
-			if !s.isExpiredFast(shard, key) {
+			if !view.expired(s, shard, key) {
 				keys = append(keys, key)
 			}
 		}

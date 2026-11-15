@@ -170,9 +170,17 @@ func (s *LockFreeStore) gcTombstones(retain time.Duration) int {
 	cutoff := time.Now().Add(-retain)
 	cutoffNanos := cutoff.UnixNano()
 	removed := 0
-	for i := 0; i < numShards; i++ {
-		shard := s.shards[i]
+	first, count := 0, numShards
+	if s.engine != nil {
+		// LSM mode: a few shards per pass, each needing an engine scan.
+		first, count = s.gcHand, lsmGCShardsPerPass
+		s.gcHand = (s.gcHand + lsmGCShardsPerPass) % numShards
+	}
+	for n := 0; n < count; n++ {
+		shard := s.shards[(first+n)%numShards]
 		shard.mu.Lock()
+		// LSM mode: load the records GC may change (no-op in memory mode).
+		shard.ensureWhere(recordHasGCState)
 		for k, t := range shard.tombstones {
 			if t.deleted.Before(cutoff) {
 				shard.ensure(k)
@@ -230,6 +238,9 @@ func (s *LockFreeStore) gcTombstones(retain time.Duration) int {
 			}
 		}
 		shard.mu.Unlock()
+		if s.engine != nil {
+			s.maybeEvict(nil)
+		}
 	}
 	return removed
 }
@@ -288,14 +299,15 @@ func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
 	shard := s.shards[shardIdx]
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
+	view := s.view(shard)
 
-	entries := make([]LWWShardEntry, 0, len(shard.data)+len(shard.tombstones)+1)
+	entries := make([]LWWShardEntry, 0, len(view.data)+len(view.tombstones)+1)
 	// The flush stamp comes first, so a peer applies it before the entries
 	// that follow.
 	if p, l, o, ok := s.FlushStampLWW(); ok {
 		entries = append(entries, LWWShardEntry{Flush: true, Physical: p, Logical: l, Origin: o})
 	}
-	for k, v := range shard.data {
+	for k, v := range view.data {
 		if v == nil {
 			continue
 		}
@@ -338,14 +350,14 @@ func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
 			}
 		}
 	}
-	for k, t := range shard.tombstones {
+	for k, t := range view.tombstones {
 		entries = append(entries, LWWShardEntry{
 			Key:      k,
 			Physical: t.stamp.TS.Physical, Logical: t.stamp.TS.Logical, Origin: t.stamp.Origin,
 			Deleted: true,
 		})
 	}
-	for k, r := range shard.ttlRecs {
+	for k, r := range view.ttlRecs {
 		entries = append(entries, LWWShardEntry{
 			Key: k, TTL: true, Deadline: r.deadline,
 			Physical: r.stamp.TS.Physical, Logical: r.stamp.TS.Logical, Origin: r.stamp.Origin,

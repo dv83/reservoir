@@ -31,8 +31,9 @@ func (s *LockFreeStore) CRDTStats() CRDTStats {
 	for i := 0; i < numShards; i++ {
 		shard := s.shards[i]
 		shard.mu.RLock()
-		st.StringTombstones += int64(len(shard.tombstones))
-		for _, v := range shard.data {
+		view := s.view(shard)
+		st.StringTombstones += int64(len(view.tombstones))
+		for _, v := range view.data {
 			if v == nil {
 				continue
 			}

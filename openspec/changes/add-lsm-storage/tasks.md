@@ -14,7 +14,7 @@
 
 - [x] 3.1 Persist tombstones, TTL registers, the flush stamp and generations
 - [x] 3.2 Expiry index and an engine-backed reaper
-- [ ] 3.3 Anti-entropy digests, KEYS, FLUSHALL, GC and stats from engine scans
+- [x] 3.3 Anti-entropy digests, KEYS, FLUSHALL, GC and stats from engine scans
 
 ## 4. Node integration
 

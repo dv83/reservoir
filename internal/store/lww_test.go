@@ -92,12 +92,21 @@ func TestGCTombstones(t *testing.T) {
 	// Backdate the "old" tombstone beyond the retention window.
 	shard := s.shards[int(FastHash("old")&s.shardMask)]
 	shard.mu.Lock()
+	shard.ensure("old") // LSM mode: load, change, mark dirty (no-ops in memory mode)
 	tomb := shard.tombstones["old"]
 	tomb.deleted = tomb.deleted.Add(-2 * time.Hour)
 	shard.tombstones["old"] = tomb
+	shard.markDirty("old")
 	shard.mu.Unlock()
 
-	if removed := s.gcTombstones(time.Hour); removed != 1 {
+	removed := s.gcTombstones(time.Hour)
+	if s.engine != nil {
+		// LSM mode GC covers a few shards per pass: run a full cycle.
+		for pass := 1; pass < numShards/lsmGCShardsPerPass; pass++ {
+			removed += s.gcTombstones(time.Hour)
+		}
+	}
+	if removed != 1 {
 		t.Fatalf("gcTombstones removed %d, want 1", removed)
 	}
 

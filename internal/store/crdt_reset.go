@@ -218,6 +218,8 @@ func (s *LockFreeStore) FlushLWW(physical int64, logical uint32, origin uint64) 
 	anyKept := false
 	for _, shard := range s.shards {
 		shard.mu.Lock()
+		// LSM mode: every key on disk is subject to the flush.
+		shard.ensureWhere(nil)
 		for key := range shard.data {
 			removed, kept := s.applyReset(shard, key, f)
 			if removed {
@@ -246,6 +248,7 @@ func (s *LockFreeStore) FlushLWW(physical int64, logical uint32, origin uint64) 
 			}
 		}
 		shard.mu.Unlock()
+		s.maybeEvict(nil)
 	}
 
 	if atomic.LoadUint32(&s.commitLogActive) != 1 || atomic.LoadUint32(&s.recoveryActive) != 0 {

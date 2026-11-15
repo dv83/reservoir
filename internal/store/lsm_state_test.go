@@ -2,6 +2,9 @@ package store
 
 import (
 	"fmt"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -190,5 +193,96 @@ func TestLSMExpiryIndexReapsColdKeys(t *testing.T) {
 	// live entry, which is not due.
 	if n := s.reapExpiryIndex(time.Now(), 1<<20); n != 0 {
 		t.Fatalf("second pass handled %d entries, want 0", n)
+	}
+}
+
+func digestStrings(s *LockFreeStore) []string {
+	var out []string
+	for i := 0; i < numShards; i++ {
+		for _, e := range s.ShardLWWDigest(i) {
+			c := ""
+			if e.Counter != nil {
+				c = fmt.Sprint(e.Counter.Base, sortedSlots(e.Counter.P), sortedSlots(e.Counter.N))
+			}
+			l := ""
+			if e.List != nil {
+				var ids []string
+				for _, d := range e.List.Elems {
+					ids = append(ids, fmt.Sprint(d))
+				}
+				sort.Strings(ids)
+				l = fmt.Sprint(ids)
+			}
+			out = append(out, fmt.Sprint(e.Key, e.Member, e.Value, e.Physical, e.Logical, e.Origin, e.Deleted, e.Hash, e.TTL, e.Deadline, e.Flush, c, l))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestLSMScansSeeDiskOnlyKeys (add-lsm-storage, task 3.3): anti-entropy
+// digests, KEYS, FLUSHALL and tombstone GC cover keys that are only on disk.
+func TestLSMScansSeeDiskOnlyKeys(t *testing.T) {
+	s := openLSMAt(t, t.TempDir())
+	defer s.Stop()
+	s.SetLocalOrigin(7)
+	for i := 0; i < 300; i++ {
+		s.SetLWW(fmt.Sprintf("s%d", i), "v", int64(100+i), 0, 1)
+	}
+	s.SAddLWW("set", 50, 0, 1, "a", "b")
+	s.HSetLWW("hash", 50, 0, 1, "f", "v")
+	s.RPush("list", "x", "y")
+	s.Incr("ctr")
+	s.DeleteLWW("s0", 1000, 0, 1)
+	s.ExpireLWW("absent", time.Now().Add(time.Hour).UnixNano(), 60, 0, 1)
+	s.Set("gone", "v")
+	s.SetExpiry("gone", time.Now().Add(30*time.Millisecond))
+	time.Sleep(50 * time.Millisecond)
+	s.Get("gone") // reclaim it, so both digests agree on it
+	s.Exists("gone")
+
+	s.DrainListDelta("list") // as replication would; pending lists stay cached
+
+	before := digestStrings(s)
+	evictAll(s)
+	if c := cachedKeys(s); c != 0 {
+		t.Fatalf("setup: %d keys still cached", c)
+	}
+	if after := digestStrings(s); !reflect.DeepEqual(before, after) {
+		t.Fatalf("digest changed after eviction: %d entries before, %d after", len(before), len(after))
+	}
+
+	keys := s.GetAllKeys()
+	sort.Strings(keys)
+	if len(keys) != 303 { // s1..s299, set, hash, list, ctr
+		t.Fatalf("KEYS after eviction returned %d keys, want 303", len(keys))
+	}
+	for _, k := range keys {
+		if k == "gone" || k == "s0" {
+			t.Fatalf("KEYS returned %q", k)
+		}
+	}
+	if c := cachedKeys(s); c != 0 {
+		t.Fatalf("scans filled the cache with %d keys", c)
+	}
+
+	// Tombstone GC reaches records on disk (retention in the past: all old).
+	for pass := 0; pass < numShards/lsmGCShardsPerPass; pass++ {
+		s.gcTombstones(-time.Hour)
+	}
+	for _, e := range digestStrings(s) {
+		if strings.HasPrefix(e, "s0 ") || strings.HasPrefix(e, "absent ") {
+			t.Fatalf("GC left %q on disk", e)
+		}
+	}
+
+	// FLUSHALL reaches every key on disk.
+	evictAll(s)
+	s.FlushLWW(time.Now().UnixNano(), 0, 1)
+	if n := len(s.GetAllKeys()); n != 0 {
+		t.Fatalf("%d keys survived FLUSHALL", n)
+	}
+	if applied, _ := s.SetLWW("s5", "stale", 105, 0, 1); applied {
+		t.Fatal("stale write after FLUSHALL was accepted")
 	}
 }
