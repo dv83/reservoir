@@ -18,6 +18,7 @@ import (
 	"reservoir/internal/commands"
 	"reservoir/internal/commitlog"
 	"reservoir/internal/connection"
+	"reservoir/internal/lsmengine"
 	"reservoir/internal/store"
 	"reservoir/pkg/config"
 	"reservoir/pkg/logger"
@@ -59,7 +60,32 @@ func New(cfg *config.Config) (*Server, error) {
 		MaxValueSize:   cfg.MaxValueSize,
 		MaxMemoryUsage: cfg.MaxMemoryUsage,
 	}
+	lsmMode := cfg.Storage == "lsm"
+	switch cfg.Storage {
+	case "", "memory", "lsm":
+	default:
+		return nil, fmt.Errorf("unknown --storage %q (memory or lsm)", cfg.Storage)
+	}
+	if lsmMode {
+		if cfg.CommitLogEnabled {
+			return nil, fmt.Errorf("--storage=lsm replaces the commit log with the engine's write-ahead log; drop --commit-log-enabled")
+		}
+		if cfg.TieringEnabled {
+			return nil, fmt.Errorf("--storage=lsm and --tiering-enabled are exclusive")
+		}
+		// --max-memory is shared: half for the key cache, a quarter for the
+		// engine's block cache, the rest for memtables and overhead.
+		storeLimits.MaxMemoryUsage = cfg.MaxMemoryUsage / 2
+	}
 	kvStore := store.NewStore(storeLimits)
+	if lsmMode {
+		if err := kvStore.EnableLSM(cfg.LSMDir, lsmengine.Options{
+			CacheBytes: cfg.MaxMemoryUsage / 4,
+			SyncWrites: cfg.LSMSyncWrites,
+		}); err != nil {
+			return nil, fmt.Errorf("failed to open LSM storage: %v", err)
+		}
+	}
 
 	// Tiered storage must be on before recovery, so a log larger than the
 	// memory budget is replayed by spilling instead of failing. The commit log

@@ -44,6 +44,14 @@ type Config struct {
 	TieringEnabled  bool
 	TieringDir      string
 	TieringFileSize int64
+
+	// Storage selects the storage engine: "memory" (default) keeps every key
+	// in RAM; "lsm" keeps keys and values in an embedded LSM engine in LSMDir
+	// behind a cache bounded by MaxMemoryUsage (add-lsm-storage). LSM mode
+	// replaces the commit log with the engine's write-ahead log.
+	Storage       string
+	LSMDir        string
+	LSMSyncWrites bool
 }
 
 // DefaultConfig returns a configuration with default values
@@ -75,6 +83,8 @@ func DefaultConfig() *Config {
 		CommitLogDir:     "./data/commitlog",
 		TieringDir:       "./data/values",
 		TieringFileSize:  64 << 20, // small enough that GC can reclaim closed files early
+		Storage:          "memory",
+		LSMDir:           "./data/lsm",
 	}
 }
 
@@ -117,6 +127,11 @@ func ParseFlags() *Config {
 	tieringDir := flag.String("tiering-dir", config.TieringDir, "Directory for spilled value files (discarded and rebuilt on restart)")
 	tieringFileSize := flag.Int64("tiering-file-size", config.TieringFileSize, "Size in bytes at which a value file is rotated")
 
+	// Storage engine flags
+	storage := flag.String("storage", config.Storage, "Storage engine: memory (all keys in RAM) or lsm (keys and values on disk behind a cache bounded by --max-memory)")
+	lsmDir := flag.String("lsm-dir", config.LSMDir, "Directory of the LSM engine (--storage=lsm)")
+	lsmSyncWrites := flag.Bool("lsm-sync-writes", config.LSMSyncWrites, "Sync the LSM write-ahead log on every write instead of every 100ms (--storage=lsm)")
+
 	flag.Parse()
 
 	// Apply parsed values
@@ -155,6 +170,9 @@ func ParseFlags() *Config {
 	config.TieringEnabled = *tieringEnabled
 	config.TieringDir = *tieringDir
 	config.TieringFileSize = *tieringFileSize
+	config.Storage = *storage
+	config.LSMDir = *lsmDir
+	config.LSMSyncWrites = *lsmSyncWrites
 
 	return config
 }
