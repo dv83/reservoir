@@ -42,9 +42,31 @@ func NewReader(dataDir string) (*Reader, error) {
 
 // ReadAll reads all entries from the commit log in chronological order
 func (r *Reader) ReadAll(callback func(*Entry) error) error {
-	// First pass: collect all entries with timestamps
-	var allEntries []*Entry
+	// The writer stamps entries in file order (see CommitLog.stampEntry), so a
+	// log it wrote is already in timestamp order and is streamed: memory stays
+	// bounded by one entry, not by the log. A log whose timestamps go backwards
+	// (written before that change, or across a clock step back) is sorted in
+	// memory as before.
+	ordered, err := r.inTimestampOrder()
+	if err != nil {
+		return err
+	}
+	if ordered {
+		for _, segmentPath := range r.segments {
+			if err := r.readSegment(segmentPath, func(entry *Entry) error {
+				if err := callback(entry); err != nil {
+					return fmt.Errorf("callback error: %w", err)
+				}
+				return nil
+			}); err != nil {
+				return fmt.Errorf("failed to read segment %s: %w", segmentPath, err)
+			}
+		}
+		return nil
+	}
 
+	logger.Warning("Commit log entries are not in timestamp order (older log format?); sorting them in memory for recovery")
+	var allEntries []*Entry
 	for _, segmentPath := range r.segments {
 		if err := r.readSegment(segmentPath, func(entry *Entry) error {
 			allEntries = append(allEntries, entry)
@@ -53,22 +75,41 @@ func (r *Reader) ReadAll(callback func(*Entry) error) error {
 			return fmt.Errorf("failed to read segment %s: %w", segmentPath, err)
 		}
 	}
-
-	// Sort all entries by timestamp to ensure chronological order
-	sort.Slice(allEntries, func(i, j int) bool {
+	// Stable, so entries with equal timestamps keep file order — the order the
+	// streaming path and compaction use.
+	sort.SliceStable(allEntries, func(i, j int) bool {
 		return allEntries[i].Timestamp < allEntries[j].Timestamp
 	})
-
 	logger.Info("Sorted %d entries by timestamp for chronological recovery", len(allEntries))
-
-	// Second pass: process entries in chronological order
 	for _, entry := range allEntries {
 		if err := callback(entry); err != nil {
 			return fmt.Errorf("callback error: %w", err)
 		}
 	}
-
 	return nil
+}
+
+// inTimestampOrder streams every segment once and reports whether timestamps
+// never decrease in file order.
+func (r *Reader) inTimestampOrder() (bool, error) {
+	var last int64
+	first := true
+	ordered := true
+	for _, segmentPath := range r.segments {
+		if err := r.readSegment(segmentPath, func(entry *Entry) error {
+			if !first && entry.Timestamp < last {
+				ordered = false
+			}
+			last, first = entry.Timestamp, false
+			return nil
+		}); err != nil {
+			return false, fmt.Errorf("failed to read segment %s: %w", segmentPath, err)
+		}
+		if !ordered {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // readSegment reads all entries from a single segment

@@ -66,6 +66,29 @@ Alternatives considered:
   complementary and larger; revisit when one node's disk-backed capacity is not
   enough.
 
+### Decision 2a (Phase 1 revision): a separate value log, not pointers into the commit log
+
+Pointing index entries into commit-log segments couples the store to the log in
+two ways that Phase 1 does not need: log appends are asynchronous (the offset is
+known only in the writer goroutine), and compaction moves entries, so every
+pointer would need updating. Phase 1 therefore spills cold string values into
+a separate append-only value log owned by the store:
+
+- a spill writes the value synchronously and keeps `(file, offset, length)` in
+  the key's `StoredValue`, which already carries the type, stamp and TTL — it is
+  the key index entry;
+- a cold read is one positioned read with a CRC check;
+- dead records (overwritten or deleted keys) are reclaimed by rewriting the live
+  records of mostly-dead files;
+- the commit log stays the source of truth. On restart recovery replays it and
+  spills at the budget again, so value files from before the restart are
+  discarded. This needs recovery to stream: entries are now stamped in the
+  writer goroutine, so file order is timestamp order and recovery no longer sorts
+  the whole log in memory.
+
+The cost is writing a spilled value twice (log and value log); only values
+evicted from RAM pay it. Pointing into the log directly remains possible later.
+
 ### Decision 3: Phase 0 before any tiering
 
 Tiering builds on the log as a value store, so the log must first be lossless

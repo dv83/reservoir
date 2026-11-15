@@ -32,6 +32,21 @@ func TestCompactionMemoryIsBoundedByKeys(t *testing.T) {
 	}
 	logBytes := int64(2*perSeg) * int64(len(value))
 
+	growth := peakHeapGrowth(func() { compactDir(t, dir) })
+	t.Logf("log %dMB, peak heap growth during compaction %.1fMB", logBytes>>20, float64(growth)/(1<<20))
+	if growth > logBytes/3 {
+		t.Fatalf("compaction grew the heap by %dMB for a %dMB log: values are held in memory", growth>>20, logBytes>>20)
+	}
+
+	got := replayDir(t, dir)
+	if len(got) != 4 {
+		t.Fatalf("compacted log holds %d keys, want 4", len(got))
+	}
+}
+
+// peakHeapGrowth runs fn while sampling the heap and returns how far the heap
+// grew above its level before fn started.
+func peakHeapGrowth(fn func()) int64 {
 	runtime.GC()
 	var base runtime.MemStats
 	runtime.ReadMemStats(&base)
@@ -56,19 +71,8 @@ func TestCompactionMemoryIsBoundedByKeys(t *testing.T) {
 			}
 		}
 	}()
-
-	compactDir(t, dir)
+	fn()
 	close(stop)
 	<-done
-
-	growth := int64(atomic.LoadUint64(&peak)) - int64(base.HeapAlloc)
-	t.Logf("log %dMB, peak heap growth during compaction %.1fMB", logBytes>>20, float64(growth)/(1<<20))
-	if growth > logBytes/3 {
-		t.Fatalf("compaction grew the heap by %dMB for a %dMB log: values are held in memory", growth>>20, logBytes>>20)
-	}
-
-	got := replayDir(t, dir)
-	if len(got) != 4 {
-		t.Fatalf("compacted log holds %d keys, want 4", len(got))
-	}
+	return int64(atomic.LoadUint64(&peak)) - int64(base.HeapAlloc)
 }

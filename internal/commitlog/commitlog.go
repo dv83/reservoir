@@ -92,6 +92,17 @@ type Segment struct {
 }
 
 // CommitLog is the main commit log structure
+// stampEntry gives a dequeued entry its timestamp and CRC. Stamping in the
+// single writer goroutine makes timestamps strictly increase in file order, so
+// replaying segments in file order is replaying them in timestamp order and
+// recovery can stream instead of sorting the whole log in memory. Entries a
+// caller enqueues one after another (a value and the EXPIRE that restates its
+// TTL) keep their order, since the channel is FIFO.
+func (cl *CommitLog) stampEntry(e *Entry) {
+	e.Timestamp = cl.nextTimestamp()
+	e.CRC = e.CalculateCRC()
+}
+
 // nextTimestamp returns a timestamp strictly greater than every one handed out
 // before it. Recovery replays entries sorted by timestamp, so two entries that
 // shared one (a value and the EXPIRE restating its TTL, written back to back)
@@ -215,17 +226,14 @@ func (cl *CommitLog) Write(operation string, key []byte, value []byte) error {
 		return err
 	}
 
+	// The writer stamps the entry (timestamp and CRC) as it dequeues it; see
+	// stampEntry.
 	entry := &Entry{
 		Type:      EntryTypeWrite,
-		Timestamp: cl.nextTimestamp(),
 		Key:       key,
 		Value:     value,
 		Operation: operation,
 	}
-
-	// Calculate CRC
-	entry.CRC = entry.CalculateCRC()
-
 	return cl.enqueue(entry)
 }
 
@@ -233,14 +241,9 @@ func (cl *CommitLog) Write(operation string, key []byte, value []byte) error {
 func (cl *CommitLog) Delete(key []byte) {
 	entry := &Entry{
 		Type:      EntryTypeDelete,
-		Timestamp: cl.nextTimestamp(),
 		Key:       key,
 		Operation: "DEL",
 	}
-
-	// Calculate CRC
-	entry.CRC = entry.CalculateCRC()
-
 	if err := cl.enqueue(entry); err != nil {
 		logger.Debug("Commit log delete not logged: %v", err)
 	}
@@ -256,6 +259,7 @@ func (cl *CommitLog) writeWorker() {
 	for {
 		select {
 		case entry := <-cl.writeChan:
+			cl.stampEntry(entry)
 			cl.batchBuffer = append(cl.batchBuffer, entry)
 
 			// Flush if batch is full
@@ -287,6 +291,7 @@ func (cl *CommitLog) writeWorker() {
 			// Drain any remaining items in channel
 			for len(cl.writeChan) > 0 {
 				entry := <-cl.writeChan
+				cl.stampEntry(entry)
 				cl.batchBuffer = append(cl.batchBuffer, entry)
 				if len(cl.batchBuffer) >= BatchSize {
 					cl.flushBatch()

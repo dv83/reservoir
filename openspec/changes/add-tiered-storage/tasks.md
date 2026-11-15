@@ -15,13 +15,13 @@
 
 ## 3. Phase 1: values on disk for strings
 
-- [ ] 3.1 Return segment and offset from log appends
-- [ ] 3.2 Add the compact key index and the byte-budgeted hot-value cache
-- [ ] 3.3 Serve cold reads from segments with CRC verification
-- [ ] 3.4 Spill values to disk at the RAM budget instead of rejecting writes
-- [ ] 3.5 Rebuild the key index from segments on startup
-- [ ] 3.6 Build anti-entropy digests from the index without loading cold values
-- [ ] 3.7 Add tiering flags and budgets, and tier metrics to the stats endpoint
+- [x] 3.1 Stamp commit-log entries in the writer so file order is replay order, and stream recovery instead of sorting the log in memory (sorted fallback for older logs)
+- [ ] 3.2 Add the value log: CRC-checked records, positioned reads, file rotation and garbage collection of dead records
+- [ ] 3.3 Cold string values in the store: tier-transparent reads that fail on a checksum error, and a CLOCK reference bit for victim selection
+- [ ] 3.4 Spill values at the RAM budget instead of rejecting writes, and reject new keys once the key index alone exceeds the budget
+- [ ] 3.5 Restart: recovery replays the log and spills at the budget again; value files from before the restart are discarded; tiering requires the commit log
+- [ ] 3.6 Anti-entropy digests read cold values from the value log one shard at a time, without caching them in RAM
+- [ ] 3.7 Add tiering flags and tier metrics to the stats endpoint
 - [ ] 3.8 Cluster e2e test: a dataset larger than the RAM budget converges and stays readable on every node
 
 ## 4. Decide Phase 2
