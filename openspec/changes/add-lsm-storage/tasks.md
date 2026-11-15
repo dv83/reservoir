@@ -8,7 +8,7 @@
 
 - [x] 2.1 Persist each write in the same step and load on a miss in LSM mode
 - [x] 2.2 Run the store test suite in LSM mode with a cache-versus-engine checker after every operation
-- [ ] 2.3 Evict clean entries by CLOCK at the cache budget
+- [x] 2.3 Evict clean entries by CLOCK at the cache budget
 
 ## 3. Engine-backed scans and side state
 
@@ -22,6 +22,7 @@
 - [ ] 4.2 Restart and crash tests: every acknowledged write outside the sync window survives
 - [ ] 4.3 Cluster e2e test: three LSM nodes converge with a cache far smaller than the data
 
-## 5. Measure
+## 5. Measure and optimize
 
 - [ ] 5.1 Benchmark many small keys (RSS, ops/s, p99) against memory mode and record the results
+- [ ] 5.2 Cut the per-write cost: commit outside the shard lock with ordered group commit, and avoid the full existence read for new keys

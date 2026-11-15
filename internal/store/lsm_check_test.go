@@ -5,6 +5,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"sync/atomic"
 	"testing"
 
 	"reservoir/internal/lsmengine"
@@ -65,9 +66,13 @@ func checkShardAgainstEngine(sh *LockFreeShard) {
 			missing = append(missing, k)
 		}
 	}
-	for k := range onDisk {
-		if _, ok := sh.data[k]; !ok {
-			extra = append(extra, k)
+	// Once entries have been evicted, keys on disk but not in the cache are
+	// expected; until then the two must match exactly.
+	if atomic.LoadInt64(&s.evictions) == 0 {
+		for k := range onDisk {
+			if _, ok := sh.data[k]; !ok {
+				extra = append(extra, k)
+			}
 		}
 	}
 	if len(missing)+len(extra) > 0 {

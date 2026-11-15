@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/bloom"
 )
 
 // Options configures an Engine.
@@ -53,6 +54,16 @@ func Open(dir string, opts Options) (*Engine, error) {
 	}
 	cache := pebble.NewCache(opts.CacheBytes)
 	po := &pebble.Options{Cache: cache}
+	// Bloom filters on every level (10 bits per key, ~1% false positives):
+	// a store write first checks whether its key exists, and for a new key —
+	// most writes in a growing keyspace — that lookup would otherwise search
+	// every level. Pebble ships with filters off.
+	po.Levels = make([]pebble.LevelOptions, 7)
+	for i := range po.Levels {
+		po.Levels[i].FilterPolicy = bloom.FilterPolicy(10)
+		po.Levels[i].FilterType = pebble.TableFilter
+	}
+	po.EnsureDefaults()
 	if opts.MemTableBytes > 0 {
 		po.MemTableSize = opts.MemTableBytes
 	}

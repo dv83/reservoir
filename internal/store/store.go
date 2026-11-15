@@ -121,7 +121,11 @@ type LockFreeStore struct {
 	engine *lsmengine.Engine
 	// lsmCheck, set by tests, runs after every persisted write-unlock.
 	lsmCheck func(shard *LockFreeShard)
-	_        [16]byte // padding до cache line boundary
+	// LSM cache eviction (lsm.go): one pass at a time, CLOCK hand, count.
+	evictMu   sync.Mutex
+	evictHand int
+	evictions int64
+	_         [16]byte // padding до cache line boundary
 }
 
 // SetLocalOrigin records this node's origin id so INCR/DECR maintain the PN

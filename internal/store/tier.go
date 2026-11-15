@@ -127,7 +127,7 @@ func stringLen(sv *StoredValue) int64 {
 // touch sets the CLOCK reference bit: a recently read value is skipped once by
 // the spiller.
 func (s *LockFreeStore) touch(sv *StoredValue) {
-	if s.tier != nil && atomic.LoadUint32(&sv.touched) == 0 {
+	if (s.tier != nil || s.engine != nil) && atomic.LoadUint32(&sv.touched) == 0 {
 		atomic.StoreUint32(&sv.touched, 1)
 	}
 }
@@ -144,6 +144,12 @@ func (s *LockFreeStore) wouldExceedMemory(held *LockFreeShard, delta int64) bool
 	}
 	over := atomic.LoadInt64(&s.totalMemory) + delta - s.limits.MaxMemoryUsage
 	if over <= 0 {
+		return false
+	}
+	if s.engine != nil {
+		// LSM mode: the cache shrinks by evicting clean entries; the write
+		// itself always fits, since the data lives on disk.
+		s.evict(held, over+s.limits.MaxMemoryUsage/100)
 		return false
 	}
 	if s.tier == nil {

@@ -88,3 +88,22 @@ ever lost by eviction because entries are clean.
 - Whole-container encoding makes a write to a large container O(size).
 - A missed persist call would make the cache and the engine diverge until the
   entry is evicted; the cache-vs-engine checker over the full suite guards it.
+
+## Store-level measurements after task 2.3
+
+`go test ./internal/store/ -run x -bench BenchmarkStorage -benchtime 2s`
+(4 goroutines on 4 cores, 16-byte keys and values, no network):
+
+| | memory | LSM, cache holds all | LSM, 4MB cache |
+|---|---|---|---|
+| SET (new keys) | 0.8-1.0 us | 4.6 us | 4.6 us |
+| GET (random of 200K) | 120-160 ns | 142 ns | 1.2-1.3 us |
+
+- A GET from the cache costs what it costs in memory mode; a miss costs about
+  1.2us (Pebble read from its block cache, then a cache fill).
+- A SET costs about 3.6us more than in memory mode, a store-level ceiling of
+  roughly 220K SETs per second on this machine, close to today's end-to-end
+  rate (100-160K), so LSM mode will lower peak write throughput until task 5.2.
+  Profile: about a third of the time is the existence read for a new key
+  (Pebble's Get builds an iterator; bloom filters, now enabled, help only for
+  data already in sstables), about 13% the commit, about 12% compaction.

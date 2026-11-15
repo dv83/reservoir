@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"reservoir/internal/lsmengine"
 	"reservoir/pkg/logger"
@@ -116,8 +117,97 @@ func (sh *LockFreeShard) load(key string) (*StoredValue, bool) {
 	if sh.wlocked {
 		sh.data[key] = v
 		s.accountMemoryDelta(sh, v.MemoryUsage())
+	} else {
+		v.touched = touchedUncached
 	}
 	return v, true
+}
+
+// touchedUncached marks a value loaded under a read lock: a copy that is not in
+// the cache. Hot read paths cache it afterwards (fillCache).
+const touchedUncached = 2
+
+// fillAfterRead caches key if v is an uncached copy loaded under a read lock.
+// The caller has released the shard lock.
+func (s *LockFreeStore) fillAfterRead(sh *LockFreeShard, key string, v *StoredValue) {
+	if s.engine == nil || v == nil || atomic.LoadUint32(&v.touched) != touchedUncached {
+		return
+	}
+	sh.mu.Lock()
+	if _, ok := sh.data[key]; !ok {
+		// Reload under the write lock rather than caching v: a write or delete
+		// may have happened since v was read.
+		if fresh, ok := sh.load(key); ok {
+			fresh.touched = 1 // just read
+		}
+	}
+	s.maybeEvict(sh)
+	sh.mu.Unlock()
+}
+
+// maybeEvict shrinks the cache back under the memory budget. held is the shard
+// the caller has write-locked.
+func (s *LockFreeStore) maybeEvict(held *LockFreeShard) {
+	if s.limits == nil || s.limits.MaxMemoryUsage <= 0 {
+		return
+	}
+	if over := atomic.LoadInt64(&s.totalMemory) - s.limits.MaxMemoryUsage; over > 0 {
+		s.evict(held, over+s.limits.MaxMemoryUsage/100)
+	}
+}
+
+// evict removes clean cache entries, CLOCK order, until need bytes are freed
+// or every shard has been visited twice. held is the shard the caller has
+// write-locked; others are only try-locked, so writers never wait on each
+// other. It returns the bytes freed.
+func (s *LockFreeStore) evict(held *LockFreeShard, need int64) int64 {
+	s.evictMu.Lock()
+	defer s.evictMu.Unlock()
+	var freed int64
+	for pass := 0; pass < 2*numShards && freed < need; pass++ {
+		sh := s.shards[s.evictHand]
+		s.evictHand = (s.evictHand + 1) % numShards
+		if sh != held {
+			if !sh.mu.TryLock() {
+				continue
+			}
+		}
+		freed += s.evictShard(sh, need-freed)
+		if sh != held {
+			sh.mu.Unlock()
+		}
+	}
+	return freed
+}
+
+// evictShard drops clean entries of one shard from the cache. Skipped: keys
+// touched under the current lock (dirty — the caller may still be mutating
+// them), lists whose deltas are not yet replicated, and recently read entries
+// (their reference bit is cleared: a second chance). The caller holds the
+// shard write lock.
+func (s *LockFreeStore) evictShard(sh *LockFreeShard, need int64) int64 {
+	var freed int64
+	for key, v := range sh.data {
+		if freed >= need {
+			break
+		}
+		if _, dirty := sh.dirty[key]; dirty || v == nil {
+			continue
+		}
+		if v.Type == ValueTypeList && v.ListVal != nil && len(v.ListVal.pending) > 0 {
+			continue
+		}
+		if atomic.LoadUint32(&v.touched) != 0 {
+			atomic.StoreUint32(&v.touched, 0)
+			continue
+		}
+		mem := v.MemoryUsage()
+		delete(sh.data, key)
+		s.accountMemoryDelta(sh, -mem)
+		freed += mem
+		atomic.AddInt64(&s.evictions, 1)
+	}
+	return freed
 }
 
 // flushShard commits the dirty keys of a shard to the engine. The caller holds

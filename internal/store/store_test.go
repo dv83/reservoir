@@ -1,8 +1,8 @@
 package store
 
 import (
-	"os"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 )

@@ -174,6 +174,10 @@ func (s *LockFreeStore) Get(key string) (string, bool) {
 	if value == nil {
 		return "", false
 	}
+	if s.engine != nil {
+		s.fillAfterRead(shard, key, value)
+		s.touch(value)
+	}
 
 	// Honor TTL on read: an expired key must not be served even though the
 	// background cleaner has not physically removed it yet.
@@ -220,6 +224,10 @@ func (s *LockFreeStore) GetString(key string) (string, bool, error) {
 		shard.mu.RUnlock()
 		if s.tier != nil {
 			atomic.AddInt64(&shard.hotReads, 1)
+			s.touch(sv)
+		}
+		if s.engine != nil {
+			s.fillAfterRead(shard, key, sv)
 			s.touch(sv)
 		}
 		return v, true, nil
