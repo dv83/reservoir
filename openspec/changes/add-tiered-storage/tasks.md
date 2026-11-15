@@ -10,7 +10,7 @@
 
 - [x] 2.1 Complete fix-compaction-state-loss
 - [x] 2.2 Replace dropping on a full write channel with backpressure, and test that no acknowledged write is lost
-- [ ] 2.3 Make compaction a streaming merge with bounded memory
+- [x] 2.3 Make compaction a streaming merge with bounded memory
 - [x] 2.4 Persist lists, and sets and hashes on standalone nodes
 
 ## 3. Phase 1: values on disk for strings

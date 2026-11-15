@@ -166,11 +166,11 @@ func compactDir(t *testing.T, dir string) {
 	}
 	sort.Strings(segs)
 	c := NewCompactor(dir)
-	state, _, err := c.buildCurrentState(segs)
+	cut, err := c.scanCutoffs(segs)
 	if err != nil {
-		t.Fatalf("buildCurrentState: %v", err)
+		t.Fatalf("scanCutoffs: %v", err)
 	}
-	path, err := c.writeCompactedSegment(state, segs[0])
+	path, _, err := c.writeCompactedSegment(segs, cut)
 	if err != nil {
 		t.Fatalf("writeCompactedSegment: %v", err)
 	}

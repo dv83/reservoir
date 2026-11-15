@@ -59,24 +59,26 @@ func (c *Compactor) Compact(currentSegmentID uint64) error {
 		return nil
 	}
 
-	// Build the current state from all segments
-	state, stats, err := c.buildCurrentState(segments)
+	// Pass 1: each key's last reset/delete and the last FLUSHALL. Memory is
+	// bounded by the number of keys; no value is held.
+	cut, err := c.scanCutoffs(segments)
 	if err != nil {
-		return fmt.Errorf("failed to build state: %w", err)
+		return fmt.Errorf("failed to scan segments: %w", err)
 	}
 
-	// Check if compaction is worthwhile
-	garbageRatio := float64(stats.totalEntries-stats.liveEntries) / float64(stats.totalEntries)
+	// Pass 2: stream the surviving entries into a new segment.
+	compactedPath, live, err := c.writeCompactedSegment(segments, cut)
+	if err != nil {
+		return fmt.Errorf("failed to write compacted segment: %w", err)
+	}
+
+	// Keep the originals if compaction would not reclaim enough.
+	garbageRatio := float64(cut.total-live) / float64(cut.total)
 	if garbageRatio < CompactionThreshold {
+		os.Remove(compactedPath)
 		logger.Info("Garbage ratio %.2f%% below threshold %.2f%%, skipping compaction",
 			garbageRatio*100, CompactionThreshold*100)
 		return nil
-	}
-
-	// Write compacted data to new segment
-	compactedPath, err := c.writeCompactedSegment(state, segments[0])
-	if err != nil {
-		return fmt.Errorf("failed to write compacted segment: %w", err)
 	}
 
 	// Atomically replace old segments with compacted one
@@ -88,17 +90,9 @@ func (c *Compactor) Compact(currentSegmentID uint64) error {
 
 	duration := time.Since(startTime)
 	logger.Info("Compaction completed in %v: %d segments -> 1 segment, %d entries -> %d entries (%.2f%% reduction)",
-		duration, len(segments), stats.totalEntries, stats.liveEntries, garbageRatio*100)
+		duration, len(segments), cut.total, live, garbageRatio*100)
 
 	return nil
-}
-
-// compactionStats tracks statistics during compaction
-type compactionStats struct {
-	totalEntries int
-	liveEntries  int
-	totalBytes   int64
-	liveBytes    int64
 }
 
 // findSegmentsToCompact finds all segments that can be compacted
@@ -155,125 +149,167 @@ func classifyEntry(e *Entry) opKind {
 	return opIncremental
 }
 
-// buildCurrentState reads all segments and returns, per key, the entries that
-// must survive compaction so that replaying them rebuilds exactly the state the
-// original segments do: everything since the key's last reset (SET, absolute
-// counter write, DEL or FLUSHALL). Keeping only the last entry per key — as
-// before — lost the value of a key followed by EXPIRE/PERSIST and every set
-// member or hash field but the last one.
-func (c *Compactor) buildCurrentState(segments []string) (map[string][]*Entry, *compactionStats, error) {
-	stats := &compactionStats{}
+// entryOrder is an entry's position in replay order: recovery replays entries
+// sorted by timestamp, and a stable sort keeps file order (segment, then index
+// within it) on ties. It is a total order, so the latest entry of a kind can be
+// found by taking a maximum in any read order — no sort, and no entries held.
+type entryOrder struct {
+	ts  int64
+	seg int
+	idx int
+}
 
+func (a entryOrder) less(b entryOrder) bool {
+	if a.ts != b.ts {
+		return a.ts < b.ts
+	}
+	if a.seg != b.seg {
+		return a.seg < b.seg
+	}
+	return a.idx < b.idx
+}
+
+// cutoffs is what compaction keeps in memory: for each key the replay position
+// of its last reset (SET, absolute counter write) or delete, and the position of
+// the last FLUSHALL. Its size depends on the number of keys, never on values or
+// on how many entries the log holds.
+type cutoffs struct {
+	key      map[string]entryOrder
+	flush    entryOrder
+	hasFlush bool
+	total    int
+}
+
+// scanCutoffs is compaction's first pass: it streams every segment once and
+// records each key's last reset or delete and the last FLUSHALL.
+func (c *Compactor) scanCutoffs(segments []string) (*cutoffs, error) {
 	reader, err := NewReader(c.dataDir)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer reader.Close()
 
-	var all []*Entry
-	for _, segment := range segments {
-		err := reader.readSegment(segment, func(entry *Entry) error {
-			stats.totalEntries++
-			all = append(all, entry)
+	cut := &cutoffs{key: make(map[string]entryOrder)}
+	for si, segment := range segments {
+		idx := 0
+		err := reader.readSegment(segment, func(e *Entry) error {
+			o := entryOrder{ts: e.Timestamp, seg: si, idx: idx}
+			idx++
+			cut.total++
+			switch classifyEntry(e) {
+			case opFlushAll:
+				if !cut.hasFlush || cut.flush.less(o) {
+					cut.flush, cut.hasFlush = o, true
+				}
+			case opReset, opDelete:
+				k := string(e.Key)
+				if cur, ok := cut.key[k]; !ok || cur.less(o) {
+					cut.key[k] = o
+				}
+			}
 			return nil
 		})
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
-
-	// Recovery replays entries in timestamp order, not file order, so decide
-	// what survives in that same order. Stable, to keep file order on ties.
-	sort.SliceStable(all, func(i, j int) bool { return all[i].Timestamp < all[j].Timestamp })
-
-	state := make(map[string][]*Entry)
-	for _, entry := range all {
-		key := string(entry.Key)
-		switch classifyEntry(entry) {
-		case opFlushAll:
-			// Everything before it is cleared on replay. The FLUSHALL itself is
-			// dropped too: compaction covers the oldest segments contiguously and
-			// recovery starts from an empty store, so nothing before it survives.
-			state = make(map[string][]*Entry)
-		case opDelete:
-			delete(state, key)
-		case opReset:
-			state[key] = []*Entry{entry}
-		default:
-			state[key] = append(state[key], entry)
-		}
-	}
-
-	for _, entries := range state {
-		stats.liveEntries += len(entries)
-		for _, entry := range entries {
-			stats.liveBytes += int64(len(entry.Key) + len(entry.Value))
-		}
-	}
-
-	return state, stats, nil
+	return cut, nil
 }
 
-// writeCompactedSegment writes the compacted state to a new segment
-func (c *Compactor) writeCompactedSegment(state map[string][]*Entry, oldestSegment string) (string, error) {
-	// Create temporary file for compacted segment
-	tempFile := filepath.Join(c.dataDir, fmt.Sprintf("compact_%d.tmp", time.Now().UnixNano()))
+// survives reports whether replaying the original segments in timestamp order
+// would still reflect e in the final state — exactly the entries the compacted
+// log must keep:
+//   - a FLUSHALL or DEL is never needed: compaction covers the oldest segments
+//     contiguously and recovery starts from an empty store, so what they clear
+//     is simply not written;
+//   - nothing replayed before the last FLUSHALL survives it;
+//   - for each key, nothing replayed before its last reset or delete survives;
+//     the reset itself does.
+//
+// Keeping only the last entry per key — as compaction once did — lost the
+// value behind an EXPIRE/PERSIST and every set member or hash field but the last.
+func (cut *cutoffs) survives(e *Entry, o entryOrder) bool {
+	switch classifyEntry(e) {
+	case opFlushAll, opDelete:
+		return false
+	}
+	if cut.hasFlush && !cut.flush.less(o) {
+		return false
+	}
+	if k, ok := cut.key[string(e.Key)]; ok && o.less(k) {
+		return false
+	}
+	return true
+}
 
+// writeCompactedSegment is compaction's second pass: it streams the segments
+// again and writes every surviving entry to a new segment, each with its
+// original timestamp (recovery sorts by timestamp across all segments, so
+// restamping would make old values look newer than the live segment's writes).
+// It returns the new segment's path and how many entries it kept.
+func (c *Compactor) writeCompactedSegment(segments []string, cut *cutoffs) (string, int, error) {
+	tempFile := filepath.Join(c.dataDir, fmt.Sprintf("compact_%d.tmp", time.Now().UnixNano()))
 	file, err := os.Create(tempFile)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	defer file.Close()
+	fail := func(err error) (string, int, error) {
+		file.Close()
+		os.Remove(tempFile)
+		return "", 0, err
+	}
 
 	writer := bufio.NewWriterSize(file, WriteBufferSize)
+	// A minimal commit log with just the writer functionality.
+	cl := &CommitLog{currentSegment: &Segment{Writer: writer}}
 
-	// Get sorted keys for deterministic output
-	keys := make([]string, 0, len(state))
-	for k := range state {
-		keys = append(keys, k)
+	reader, err := NewReader(c.dataDir)
+	if err != nil {
+		return fail(err)
 	}
-	sort.Strings(keys)
+	defer reader.Close()
 
-	// Create a minimal commit log with just the writer functionality
-	cl := &CommitLog{
-		currentSegment: &Segment{
-			Writer: writer,
-		},
-	}
-
-	// Write every retained entry, PRESERVING its original timestamp. Recovery
-	// sorts every entry across all segments by timestamp, so stamping compacted
-	// entries with time.Now() would make these (old) values appear newer than
-	// writes already recorded in the live current segment and resurrect stale
-	// data. Each key's entries are already in timestamp order.
-	for _, key := range keys {
-		for _, entry := range state[key] {
-			entry.CRC = entry.CalculateCRC() // CRC is unchanged, recomputed defensively
-
-			if err := cl.writeEntry(entry); err != nil {
-				return "", fmt.Errorf("failed to write entry: %w", err)
+	live := 0
+	for si, segment := range segments {
+		idx := 0
+		err := reader.readSegment(segment, func(e *Entry) error {
+			o := entryOrder{ts: e.Timestamp, seg: si, idx: idx}
+			idx++
+			if !cut.survives(e, o) {
+				return nil
 			}
+			live++
+			e.CRC = e.CalculateCRC() // unchanged; recomputed defensively
+			if err := cl.writeEntry(e); err != nil {
+				return fmt.Errorf("failed to write entry: %w", err)
+			}
+			return nil
+		})
+		if err != nil {
+			return fail(err)
 		}
 	}
 
-	// Flush and sync
 	if err := writer.Flush(); err != nil {
-		return "", err
+		return fail(err)
 	}
 	if err := file.Sync(); err != nil {
-		return "", err
+		return fail(err)
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(tempFile)
+		return "", 0, err
 	}
 
-	// Rename to final name (use timestamp from oldest segment to maintain order)
-	baseName := filepath.Base(oldestSegment)
+	// Name it after the oldest segment, so segment order is kept.
+	baseName := filepath.Base(segments[0])
 	compactedName := strings.TrimSuffix(baseName, SegmentFileExtension) + ".compacted" + SegmentFileExtension
 	finalPath := filepath.Join(c.dataDir, compactedName)
-
 	if err := os.Rename(tempFile, finalPath); err != nil {
-		return "", err
+		os.Remove(tempFile)
+		return "", 0, err
 	}
-
-	return finalPath, nil
+	return finalPath, live, nil
 }
 
 // replaceSegments atomically replaces old segments with the compacted one

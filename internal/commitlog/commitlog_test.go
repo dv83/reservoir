@@ -1,7 +1,6 @@
 package commitlog
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -31,22 +30,9 @@ func TestValidateEntrySizes(t *testing.T) {
 // sort after newer live-segment writes during recovery and resurrect stale data.
 func TestCompactionPreservesTimestamps(t *testing.T) {
 	dir := t.TempDir()
-	c := NewCompactor(dir)
-
-	state := map[string][]*Entry{
-		"a": {{Type: EntryTypeWrite, Timestamp: 100, Operation: "SET", Key: []byte("a"), Value: []byte("va")}},
-		"b": {{Type: EntryTypeWrite, Timestamp: 200, Operation: "SET", Key: []byte("b"), Value: []byte("vb")}},
-	}
-	for _, entries := range state {
-		for _, e := range entries {
-			e.CRC = e.CalculateCRC()
-		}
-	}
-
-	oldest := filepath.Join(dir, "0000000000000001"+SegmentFileExtension)
-	if _, err := c.writeCompactedSegment(state, oldest); err != nil {
-		t.Fatalf("writeCompactedSegment: %v", err)
-	}
+	writeSegment(t, dir, 1, []*Entry{wr(100, "SET", "a", "va")})
+	writeSegment(t, dir, 2, []*Entry{wr(200, "SET", "b", "vb")})
+	compactDir(t, dir)
 
 	reader, err := NewReader(dir)
 	if err != nil {
