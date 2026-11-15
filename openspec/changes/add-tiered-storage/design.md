@@ -140,3 +140,50 @@ rounded to its size class), 32 the key and value bytes, and about 40 the map
 entry. Further gains need structural changes (values stored inline in the shard
 map, or one container pointer instead of three) and are left for Phase 1, where
 the key index replaces this layout for cold keys anyway.
+
+## Phase 1 measurements (input for task 4.1)
+
+One node, commit log on, redis-benchmark `-c 50`: 300K SETs of 1KB values over
+150K random keys (about 130K live keys, 130MB of values), then 300K random GETs,
+then a restart and the GETs again. Same build; A keeps everything in RAM, B has
+a 32MB budget (about 4x smaller than the data).
+
+| | A: RAM only (2GB budget) | B: tiering, 32MB budget |
+|---|---|---|
+| SET | 100K ops/s, p99 1.35ms | 95K ops/s, p99 2.1ms |
+| GET | 99-105K ops/s, p99 0.68-0.75ms | 104-106K ops/s, p99 0.82-0.94ms |
+| RSS after load | 298MB | 146MB |
+| RAM hit rate (uniform keys) | 100% | 21.5% (budget / data) |
+| Cold keys / values on disk | - | 102K keys, 104MB live, 135MB of files |
+| Restart + recovery (306MB log) | 1.5s | 1.7s (re-spills 216K values) |
+
+Findings:
+
+- Throughput is unchanged and tail latency rises moderately. The value files fit
+  in the OS page cache here, so cold reads did not wait on the disk; a data set
+  larger than host RAM will show the device's latency on cold reads.
+- SET p99 rises because writes spill synchronously when they hit the budget. A
+  background spiller that keeps RAM at a low watermark would take this off the
+  write path.
+- `--max-memory` bounds accounted bytes, not RSS: B's RSS is about 4x its
+  budget (key index, map overhead, garbage awaiting GC, I/O buffers). Operators
+  should size the budget well below the RAM they can give the process.
+- The key index costs about 180 bytes per cold key (96-byte StoredValue, 24-byte
+  reference, key, map entry), so one GB of RAM indexes about 5-6M keys. Values
+  under 64 bytes never spill, so data sets of many small keys gain nothing from
+  Phase 1.
+- With 256MB value files, garbage collection never ran on this workload (only
+  closed files are collected); the default is now 64MB, and the same run
+  reclaimed 134MB.
+
+Options for Phase 2:
+
+1. Keep this engine and finish it: background spiller, cache promotion of hot
+   cold values, value files referenced directly from the commit log (no second
+   write), then containers on disk.
+2. An embedded LSM engine (for example Pebble): keys beyond RAM and large
+   containers, at the cost of replacing the storage engine and re-encoding CRDT
+   state.
+
+Which one depends on the workload: many small keys point to option 2, large
+values with a hot subset to option 1.

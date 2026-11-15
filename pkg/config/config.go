@@ -74,7 +74,7 @@ func DefaultConfig() *Config {
 		CommitLogEnabled: false,
 		CommitLogDir:     "./data/commitlog",
 		TieringDir:       "./data/values",
-		TieringFileSize:  256 << 20,
+		TieringFileSize:  64 << 20, // small enough that GC can reclaim closed files early
 	}
 }
 
