@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -103,20 +104,25 @@ func (m *shardMutex) Unlock() {
 // flush panics, so one failure cannot leave the shard locked.
 func (m *shardMutex) unlockFlush() {
 	sh := m.sh
+	released := false
 	defer func() {
-		clear(sh.loaded)
-		sh.wlocked = false
-		m.RWMutex.Unlock()
+		if !released {
+			clear(sh.loaded)
+			sh.wlocked = false
+			m.RWMutex.Unlock()
+		}
 	}()
 	if len(sh.dirty) > 0 {
 		sh.owner.flushShard(sh)
 	}
-	// Any section that loaded keys may have grown the cache — including a
-	// replicated or anti-entropy write that loaded a key and was then dropped
-	// as stale, which never reaches the write-path budget check.
-	if len(sh.loaded) > 0 {
-		sh.owner.maybeEvict(sh)
-	}
+	clear(sh.loaded)
+	sh.wlocked = false
+	released = true
+	m.RWMutex.Unlock()
+	// Any section that wrote or loaded keys may have grown the cache —
+	// including a replicated or anti-entropy write that loaded a key and was
+	// then dropped as stale. Evict now, holding no shard lock.
+	sh.owner.maybeEvict()
 }
 
 // EnableLSM switches the store to LSM storage mode with the engine in dir. It
@@ -315,6 +321,12 @@ func (sh *LockFreeShard) load(key string) (*StoredValue, bool) {
 		return nil, false
 	}
 	expired := rec.value != nil && rec.deadline != 0 && time.Now().UnixNano() > rec.deadline
+	// From here key may be stored in the shard's maps, which outlive the
+	// call. Read paths pass zero-copy keys that alias the protocol buffer; a
+	// map key that changes when the buffer is reused can never be found or
+	// deleted again (and would serve one key's value under another), so keep
+	// a copy.
+	key = strings.Clone(key)
 
 	if !sh.wlocked {
 		// Cache the deadline even when it has passed: the next expiry check
@@ -381,37 +393,47 @@ func (s *LockFreeStore) fillAfterRead(sh *LockFreeShard, key string, v *StoredVa
 	sh.mu.Unlock()
 }
 
-// maybeEvict shrinks the cache back under the memory budget. held is the shard
-// the caller has write-locked.
-func (s *LockFreeStore) maybeEvict(held *LockFreeShard) {
-	if s.limits == nil || s.limits.MaxMemoryUsage <= 0 {
+// maybeEvict shrinks the cache back under the memory budget.
+//
+// It runs only with no shard lock held, so eviction can take each shard's lock
+// and wait for it: try-locking from inside another shard's critical section
+// skipped busy shards, and under concurrent load evicted less than reads
+// loaded. One goroutine evicts at a time; others carry on (the evictor works
+// until the cache is back under budget).
+func (s *LockFreeStore) maybeEvict() {
+	if s.engine == nil || s.limits == nil || s.limits.MaxMemoryUsage <= 0 {
 		return
 	}
-	if over := s.cacheUsage() - s.limits.MaxMemoryUsage; over > 0 {
-		s.evict(held, over+s.limits.MaxMemoryUsage/100)
+	if s.cacheUsage() <= s.limits.MaxMemoryUsage {
+		return
+	}
+	if !s.evictMu.TryLock() {
+		return
+	}
+	defer s.evictMu.Unlock()
+	for round := 0; round < 4; round++ {
+		over := s.cacheUsage() - s.limits.MaxMemoryUsage
+		if over <= 0 {
+			return
+		}
+		if s.evictLocked(over+s.limits.MaxMemoryUsage/100) == 0 {
+			return
+		}
 	}
 }
 
-// evict removes clean cache entries, CLOCK order, until need bytes are freed
-// or every shard has been visited twice. held is the shard the caller has
-// write-locked; others are only try-locked, so writers never wait on each
-// other. It returns the bytes freed.
-func (s *LockFreeStore) evict(held *LockFreeShard, need int64) int64 {
-	s.evictMu.Lock()
-	defer s.evictMu.Unlock()
+// evictLocked removes clean cache entries, CLOCK order, until need bytes are
+// freed or every shard has been visited twice, locking one shard at a time.
+// The caller holds evictMu and no shard lock. It returns the bytes freed.
+func (s *LockFreeStore) evictLocked(need int64) int64 {
 	var freed int64
 	for pass := 0; pass < 2*numShards && freed < need; pass++ {
 		sh := s.shards[s.evictHand]
 		s.evictHand = (s.evictHand + 1) % numShards
-		if sh != held {
-			if !sh.mu.TryLock() {
-				continue
-			}
-		}
+		sh.mu.Lock()
 		freed += s.evictShard(sh, need-freed)
-		if sh != held {
-			sh.mu.Unlock()
-		}
+		sh.wlocked = false
+		sh.mu.RWMutex.Unlock() // nothing to flush: eviction drops clean entries
 	}
 	return freed
 }
@@ -738,4 +760,34 @@ func (s *LockFreeStore) cacheUsage() int64 {
 // LSMCacheStats reports the LSM cache: entries, evictions and usage.
 func (s *LockFreeStore) LSMCacheStats() (entries, evictions, usage int64) {
 	return atomic.LoadInt64(&s.cachedEntries), atomic.LoadInt64(&s.evictions), s.cacheUsage()
+}
+
+// LSMStats returns LSM-mode metrics, or nil in memory mode.
+func (s *LockFreeStore) LSMStats() map[string]interface{} {
+	if s.engine == nil {
+		return nil
+	}
+	es := s.engine.Stats()
+	var mapped int
+	for _, sh := range s.shards {
+		sh.mu.RLock()
+		mapped += len(sh.data)
+		sh.mu.RUnlock()
+	}
+	return map[string]interface{}{
+		"cache_map_entries":   mapped,
+		"cache_budget":        s.limits.MaxMemoryUsage,
+		"cache_usage":         s.cacheUsage(),
+		"cache_entries":       atomic.LoadInt64(&s.cachedEntries),
+		"evictions_total":     atomic.LoadInt64(&s.evictions),
+		"keys":                atomic.LoadInt64(&s.totalKeys),
+		"expired_reaped":      atomic.LoadInt64(&s.lsmReaped),
+		"engine_disk_bytes":   es.DiskBytes,
+		"engine_cache_bytes":  es.CacheBytes,
+		"engine_cache_hits":   es.CacheHits,
+		"engine_cache_misses": es.CacheMisses,
+		"engine_memtable":     es.MemTableBytes,
+		"engine_compactions":  es.Compactions,
+		"engine_wal_bytes":    es.WALBytes,
+	}
 }

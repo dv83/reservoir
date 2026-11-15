@@ -140,6 +140,25 @@ func StartUIServer(addr string, kvStore store.KVStore, clusterManager *cluster.C
 		}
 	})
 
+	// API Endpoint for LSM storage: key cache budget, usage and evictions, and
+	// the engine's disk, block cache, memtable and compaction figures.
+	mux.HandleFunc("/api/lsm", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		stats := kvStore.LSMStats()
+		if stats == nil {
+			stats = map[string]interface{}{"enabled": false}
+		} else {
+			stats["enabled"] = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(stats); err != nil {
+			logger.Error("Failed to encode LSM stats: %v", err)
+		}
+	})
+
 	// Serve Static Files (embedded HTML)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {

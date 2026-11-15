@@ -117,6 +117,8 @@ type KVStore interface {
 	GetString(key string) (string, bool, error)
 	// TierStats returns tiered-storage metrics, or nil when tiering is off.
 	TierStats() map[string]interface{}
+	// LSMStats returns LSM storage metrics, or nil in memory mode.
+	LSMStats() map[string]interface{}
 	GetKeysByShards() map[int][]string
 	GetKeyMemoryUsage(key string) int64
 	GetKeyType(key string) ValueType

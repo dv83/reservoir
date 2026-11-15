@@ -239,7 +239,7 @@ func (s *LockFreeStore) gcTombstones(retain time.Duration) int {
 		}
 		shard.mu.Unlock()
 		if s.engine != nil {
-			s.maybeEvict(nil)
+			s.maybeEvict()
 		}
 	}
 	return removed

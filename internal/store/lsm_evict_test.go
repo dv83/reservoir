@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"math/rand"
 	"strings"
 	"sync"
 	"testing"
@@ -178,5 +179,36 @@ func TestLSMStaleWritesDoNotGrowCache(t *testing.T) {
 	}
 	if used := s.GetMemoryUsage(); used > budget*11/10 {
 		t.Fatalf("cache usage %d after stale writes, budget %d", used, budget)
+	}
+}
+
+// TestLSMConcurrentReadsStayInBudget: many concurrent readers over a keyspace
+// far larger than the cache keep it within its budget. Eviction used to run
+// inside the reader's critical section and only try-lock other shards; under
+// this load it freed less than the reads loaded and the cache grew without
+// bound.
+func TestLSMConcurrentReadsStayInBudget(t *testing.T) {
+	const budget, n = 256 << 10, 30000
+	s := newLSMStore(t, budget)
+	s.lsmCheck = nil // keep the hot path realistic
+	for i := 0; i < n; i++ {
+		s.Set(fmt.Sprintf("k%d", i), "xxxxxxxxxxxxxxxx")
+	}
+	var wg sync.WaitGroup
+	for g := 0; g < 32; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(int64(g)))
+			for i := 0; i < 20000; i++ {
+				s.GetString(fmt.Sprintf("k%d", r.Intn(n)))
+			}
+		}(g)
+	}
+	wg.Wait()
+	entries, evictions, used := s.LSMCacheStats()
+	t.Logf("cache usage %d (budget %d), %d entries, %d evictions", used, budget, entries, evictions)
+	if used > budget*11/10 {
+		t.Fatalf("cache usage %d after concurrent reads, budget %d", used, budget)
 	}
 }

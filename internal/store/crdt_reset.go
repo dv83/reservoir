@@ -248,7 +248,7 @@ func (s *LockFreeStore) FlushLWW(physical int64, logical uint32, origin uint64) 
 			}
 		}
 		shard.mu.Unlock()
-		s.maybeEvict(nil)
+		s.maybeEvict()
 	}
 
 	if atomic.LoadUint32(&s.commitLogActive) != 1 || atomic.LoadUint32(&s.recoveryActive) != 0 {

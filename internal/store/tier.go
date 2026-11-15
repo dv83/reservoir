@@ -151,9 +151,8 @@ func (s *LockFreeStore) wouldExceedMemory(held *LockFreeShard, delta int64) bool
 		return false
 	}
 	if s.engine != nil {
-		// LSM mode: the cache shrinks by evicting clean entries; the write
-		// itself always fits, since the data lives on disk.
-		s.evict(held, over+s.limits.MaxMemoryUsage/100)
+		// LSM mode: the write always fits — the data lives on disk — and the
+		// cache is shrunk when this write's lock is released (maybeEvict).
 		return false
 	}
 	if s.tier == nil {
