@@ -683,7 +683,9 @@ func newLSME2ECluster(t *testing.T, cache int64) []*e2eNode {
 // TestClusterLSMConverges (add-lsm-storage, task 4.3): three LSM nodes whose
 // key caches hold a small fraction of the data converge after writes on every
 // node, overwrites, deletes a peer missed and anti-entropy — reads, digests
-// and deletes all reach keys that live only on disk.
+// and deletes all reach keys that live only on disk. Each node's cache, per-entry
+// overhead included, stays within 1.1x its budget although anti-entropy
+// re-sends every key.
 func TestClusterLSMConverges(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping cluster e2e test in -short mode")
@@ -739,8 +741,9 @@ func TestClusterLSMConverges(t *testing.T) {
 	}
 	for i, nd := range nodes {
 		used := nd.store.GetMemoryUsage()
-		t.Logf("node %d: %d keys, cache memory %d", i, nd.store.GetKeyCount(), used)
-		if used > 256<<10*12/10 {
+		entries, evictions, _ := nd.store.(*store.LockFreeStore).LSMCacheStats()
+		t.Logf("node %d: %d keys, cache memory %d, cached entries %d, evictions %d", i, nd.store.GetKeyCount(), used, entries, evictions)
+		if used > 256<<10*11/10 {
 			t.Errorf("node %d cache %d over its 256KB budget", i, used)
 		}
 	}

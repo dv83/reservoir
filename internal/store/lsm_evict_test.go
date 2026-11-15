@@ -160,3 +160,23 @@ func TestLSMConcurrentWithEviction(t *testing.T) {
 		}
 	}
 }
+
+// TestLSMStaleWritesDoNotGrowCache: replicated or anti-entropy writes that
+// load an evicted key and are then dropped as stale must not grow the cache
+// past its budget (they never reach the write-path budget check).
+func TestLSMStaleWritesDoNotGrowCache(t *testing.T) {
+	const budget = 128 << 10
+	s := newLSMStore(t, budget)
+	s.SetLocalOrigin(5)
+	for i := 0; i < 5000; i++ {
+		s.SetLWW(fmt.Sprintf("k%d", i), strings.Repeat("v", 40), 1000, 0, 1)
+	}
+	for i := 0; i < 5000; i++ { // anti-entropy re-sending everything, all stale
+		if applied, _ := s.SetLWW(fmt.Sprintf("k%d", i), "old", 500, 0, 1); applied {
+			t.Fatal("stale write applied")
+		}
+	}
+	if used := s.GetMemoryUsage(); used > budget*11/10 {
+		t.Fatalf("cache usage %d after stale writes, budget %d", used, budget)
+	}
+}

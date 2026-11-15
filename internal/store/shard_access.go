@@ -1,5 +1,7 @@
 package store
 
+import "sync/atomic"
+
 // Shard map access (add-lsm-storage, tasks 1.3 and 2.1). Every read, write and
 // delete of a shard's map goes through these helpers. In memory mode they are
 // plain map operations. In LSM mode the map is a write-through cache over the
@@ -45,19 +47,25 @@ func (sh *LockFreeShard) getV(key string) *StoredValue {
 // put stores v under key. The caller holds the shard write lock.
 func (sh *LockFreeShard) put(key string, v *StoredValue) {
 	sh.ensure(key)
-	sh.data[key] = v
 	if sh.dirty != nil {
+		if _, had := sh.data[key]; !had {
+			atomic.AddInt64(&sh.owner.cachedEntries, 1)
+		}
 		sh.dirty[key] = struct{}{}
 	}
+	sh.data[key] = v
 }
 
 // del removes key. The caller holds the shard write lock.
 func (sh *LockFreeShard) del(key string) {
 	sh.ensure(key)
-	delete(sh.data, key)
 	if sh.dirty != nil {
+		if _, had := sh.data[key]; had {
+			atomic.AddInt64(&sh.owner.cachedEntries, -1)
+		}
 		sh.dirty[key] = struct{}{}
 	}
+	delete(sh.data, key)
 }
 
 // markDirty records that key's side state (tombstone, TTL register or TTL

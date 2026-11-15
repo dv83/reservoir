@@ -142,7 +142,11 @@ func (s *LockFreeStore) wouldExceedMemory(held *LockFreeShard, delta int64) bool
 	if s.limits == nil || s.limits.MaxMemoryUsage <= 0 || delta <= 0 {
 		return false
 	}
-	over := atomic.LoadInt64(&s.totalMemory) + delta - s.limits.MaxMemoryUsage
+	used := atomic.LoadInt64(&s.totalMemory)
+	if s.engine != nil {
+		used = s.cacheUsage()
+	}
+	over := used + delta - s.limits.MaxMemoryUsage
 	if over <= 0 {
 		return false
 	}

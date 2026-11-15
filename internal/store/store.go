@@ -132,8 +132,10 @@ type LockFreeStore struct {
 	lsmStop   chan struct{}
 	lsmDone   chan struct{}
 	lsmReaped int64
-	gcHand    int      // next shard for LSM-mode tombstone GC
-	_         [16]byte // padding до cache line boundary
+	gcHand    int // next shard for LSM-mode tombstone GC
+	// cachedEntries counts keys in the LSM cache (lsm.go, cacheUsage).
+	cachedEntries int64
+	_             [16]byte // padding до cache line boundary
 }
 
 // SetLocalOrigin records this node's origin id so INCR/DECR maintain the PN
@@ -706,6 +708,9 @@ func (s *LockFreeStore) accountMemoryDelta(shard *LockFreeShard, delta int64) {
 
 // GetMemoryUsage - отримання загального використання пам'яті
 func (s *LockFreeStore) GetMemoryUsage() int64 {
+	if s.engine != nil {
+		return s.cacheUsage() // LSM mode: the cache, including per-entry overhead
+	}
 	return atomic.LoadInt64(&s.totalMemory)
 }
 
@@ -871,6 +876,9 @@ func (s *LockFreeStore) Clear() {
 
 		// Clear the data map (in LSM mode the cache and its stored values).
 		shard.mu.Lock()
+		if s.engine != nil {
+			atomic.AddInt64(&s.cachedEntries, -int64(len(shard.data)))
+		}
 		shard.data = make(map[string]*StoredValue)
 		clear(shard.dirty)
 		if s.engine != nil && i == 0 {

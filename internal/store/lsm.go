@@ -111,6 +111,12 @@ func (m *shardMutex) unlockFlush() {
 	if len(sh.dirty) > 0 {
 		sh.owner.flushShard(sh)
 	}
+	// Any section that loaded keys may have grown the cache — including a
+	// replicated or anti-entropy write that loaded a key and was then dropped
+	// as stale, which never reaches the write-path budget check.
+	if len(sh.loaded) > 0 {
+		sh.owner.maybeEvict(sh)
+	}
 }
 
 // EnableLSM switches the store to LSM storage mode with the engine in dir. It
@@ -348,6 +354,7 @@ func (sh *LockFreeShard) load(key string) (*StoredValue, bool) {
 		return nil, false
 	}
 	sh.data[key] = rec.value
+	atomic.AddInt64(&s.cachedEntries, 1)
 	s.accountMemoryDelta(sh, rec.value.MemoryUsage())
 	return rec.value, true
 }
@@ -366,11 +373,11 @@ func (s *LockFreeStore) fillAfterRead(sh *LockFreeShard, key string, v *StoredVa
 	if _, ok := sh.data[key]; !ok {
 		// Reload under the write lock rather than caching v: a write or delete
 		// may have happened since v was read.
+		sh.loaded[key] = struct{}{} // Unlock then evicts back to the budget
 		if fresh, ok := sh.load(key); ok {
 			fresh.touched = 1 // just read
 		}
 	}
-	s.maybeEvict(sh)
 	sh.mu.Unlock()
 }
 
@@ -380,7 +387,7 @@ func (s *LockFreeStore) maybeEvict(held *LockFreeShard) {
 	if s.limits == nil || s.limits.MaxMemoryUsage <= 0 {
 		return
 	}
-	if over := atomic.LoadInt64(&s.totalMemory) - s.limits.MaxMemoryUsage; over > 0 {
+	if over := s.cacheUsage() - s.limits.MaxMemoryUsage; over > 0 {
 		s.evict(held, over+s.limits.MaxMemoryUsage/100)
 	}
 }
@@ -430,15 +437,16 @@ func (s *LockFreeStore) evictShard(sh *LockFreeShard, need int64) int64 {
 			atomic.StoreUint32(&v.touched, 0)
 			continue
 		}
-		mem := v.MemoryUsage()
+		mem := v.MemoryUsage() + lsmEntryOverhead
 		delete(sh.data, key)
+		atomic.AddInt64(&s.cachedEntries, -1)
 		// The record on disk holds the key's side state too.
 		delete(sh.tombstones, key)
 		delete(sh.ttlRecs, key)
 		sh.expiryMu.Lock()
 		delete(sh.expiry, key)
 		sh.expiryMu.Unlock()
-		s.accountMemoryDelta(sh, -mem)
+		s.accountMemoryDelta(sh, -(mem - lsmEntryOverhead))
 		freed += mem
 		atomic.AddInt64(&s.evictions, 1)
 	}
@@ -714,3 +722,20 @@ func recordHasGCState(b []byte) bool {
 // mode, where each needs an engine scan: with GC every minute a full cycle
 // takes about half an hour, so tombstones live one to one and a half hours.
 const lsmGCShardsPerPass = 8
+
+// lsmEntryOverhead is the heap a cache entry costs beyond the key and value
+// bytes the store accounts: the StoredValue allocation (96 bytes) and its map
+// slot (key header, value pointer, control bytes at the map's load factor).
+// Without it a cache of small keys used five times its budget.
+const lsmEntryOverhead = 144
+
+// cacheUsage is the LSM cache's memory: accounted bytes plus the per-entry
+// overhead. The budget and eviction are measured against it.
+func (s *LockFreeStore) cacheUsage() int64 {
+	return atomic.LoadInt64(&s.totalMemory) + atomic.LoadInt64(&s.cachedEntries)*lsmEntryOverhead
+}
+
+// LSMCacheStats reports the LSM cache: entries, evictions and usage.
+func (s *LockFreeStore) LSMCacheStats() (entries, evictions, usage int64) {
+	return atomic.LoadInt64(&s.cachedEntries), atomic.LoadInt64(&s.evictions), s.cacheUsage()
+}
