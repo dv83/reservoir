@@ -6,8 +6,8 @@
 
 ## 2. Write-through cache
 
-- [ ] 2.1 Persist each write in the same step and load on a miss in LSM mode
-- [ ] 2.2 Run the store test suite in LSM mode with a cache-versus-engine checker after every operation
+- [x] 2.1 Persist each write in the same step and load on a miss in LSM mode
+- [x] 2.2 Run the store test suite in LSM mode with a cache-versus-engine checker after every operation
 - [ ] 2.3 Evict clean entries by CLOCK at the cache budget
 
 ## 3. Engine-backed scans and side state

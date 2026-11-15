@@ -209,7 +209,9 @@ func TestDecodedValueBehavesTheSame(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			b.shards[i].data[key] = dec
+			b.shards[i].mu.Lock()
+			b.shards[i].put(key, dec)
+			b.shards[i].mu.Unlock()
 		}
 		// Side state the codec does not cover (persisted separately, task 3.1).
 		for k, v := range shard.tombstones {

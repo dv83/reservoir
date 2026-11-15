@@ -1,6 +1,7 @@
 package store
 
 import (
+	"os"
 	"fmt"
 	"sync"
 	"testing"
@@ -369,5 +370,9 @@ func createTestStore() *LockFreeStore {
 		MaxValueSize:   1024 * 1024,
 		MaxMemoryUsage: 100 * 1024 * 1024,
 	}
-	return NewLockFreeStore(limits)
+	s := NewLockFreeStore(limits)
+	if os.Getenv("RESERVOIR_TEST_LSM") != "" {
+		enableTestLSM(s)
+	}
+	return s
 }

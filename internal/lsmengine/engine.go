@@ -120,6 +120,18 @@ func (b *Batch) Set(key, value []byte) { _ = b.b.Set(key, value, nil) }
 // Delete adds a delete of key.
 func (b *Batch) Delete(key []byte) { _ = b.b.Delete(key, nil) }
 
+// DeleteRange adds a delete of every key in [start, end).
+func (b *Batch) DeleteRange(start, end []byte) { _ = b.b.DeleteRange(start, end, nil) }
+
+// DeletePrefix adds a delete of every key with the given prefix.
+func (b *Batch) DeletePrefix(prefix []byte) {
+	end := prefixEnd(prefix)
+	if end == nil {
+		end = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	}
+	b.DeleteRange(prefix, end)
+}
+
 // Empty reports whether the batch holds no writes.
 func (b *Batch) Empty() bool { return b.b.Empty() }
 

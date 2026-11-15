@@ -8,6 +8,7 @@ import (
 	"time"
 	"unsafe"
 
+	"reservoir/internal/lsmengine"
 	pkgErrors "reservoir/pkg/errors"
 )
 
@@ -32,7 +33,7 @@ func NewStore(limits *Limits) *Store {
 // Оптимізовано для cache line alignment та розділення hot/cold даних
 type LockFreeShard struct {
 	// HOT DATA: часто використовувані поля в першій cache line (64 bytes)
-	mu          sync.RWMutex            // 24 bytes на x86-64
+	mu          shardMutex              // RWMutex that persists dirty keys on Unlock in LSM mode (lsm.go)
 	data        map[string]*StoredValue // 8 bytes (pointer)
 	memoryUsage int64                   // 8 bytes - atomic counter
 	keyCount    int64                   // 8 bytes - atomic counter
@@ -59,6 +60,14 @@ type LockFreeShard struct {
 	// follows still applies when that write lands. A SET newer than the record
 	// supersedes it (clearing the TTL); an older SET leaves it in force.
 	ttlRecs map[string]ttlRec
+
+	// LSM storage mode (lsm.go): the owning store, this shard's index (the
+	// engine key prefix), whether the write lock is held, and the keys touched
+	// under it. dirty is nil in memory mode.
+	owner   *LockFreeStore
+	idx     byte
+	wlocked bool
+	dirty   map[string]struct{}
 }
 
 // tombstone marks a key as deleted at a given LWW stamp, retained until GC.
@@ -108,7 +117,11 @@ type LockFreeStore struct {
 	flushStamp hlcStamp
 	// tier is the tiered-storage state, nil when tiering is off (tier.go).
 	tier *tierState
-	_    [16]byte // padding до cache line boundary
+	// engine is the LSM engine in LSM storage mode, nil otherwise (lsm.go).
+	engine *lsmengine.Engine
+	// lsmCheck, set by tests, runs after every persisted write-unlock.
+	lsmCheck func(shard *LockFreeShard)
+	_        [16]byte // padding до cache line boundary
 }
 
 // SetLocalOrigin records this node's origin id so INCR/DECR maintain the PN
@@ -146,7 +159,10 @@ func NewLockFreeStore(limits *Limits) *LockFreeStore {
 			expiry:     make(map[string]time.Time),
 			tombstones: make(map[string]tombstone),
 			ttlRecs:    make(map[string]ttlRec),
+			owner:      store,
+			idx:        byte(i),
 		}
+		store.shards[i].mu.sh = store.shards[i]
 	}
 
 	// Встановлюємо посилання на store в async metrics
@@ -730,6 +746,19 @@ func (s *LockFreeStore) Stop() {
 
 	// Stop value-log collection and close the value files.
 	s.stopTiering()
+
+	// Tests: a final cache-versus-engine check of every shard, catching a
+	// change no later write would have flushed.
+	if s.lsmCheck != nil {
+		for _, sh := range s.shards {
+			sh.mu.Lock()
+			s.lsmCheck(sh)
+			sh.mu.Unlock()
+		}
+	}
+
+	// Close the LSM engine (syncing its write-ahead log).
+	s.closeLSM()
 }
 
 // GetLatencyMetrics повертає поточні latency метрики
@@ -797,9 +826,13 @@ func (s *LockFreeStore) Clear() {
 	for i := 0; i < numShards; i++ {
 		shard := s.shards[i]
 
-		// Clear the data map
+		// Clear the data map (in LSM mode the cache and its stored values).
 		shard.mu.Lock()
 		shard.data = make(map[string]*StoredValue)
+		clear(shard.dirty)
+		if s.engine != nil && i == 0 {
+			s.clearEngine()
+		}
 		shard.mu.Unlock()
 
 		// Clear expiry map
