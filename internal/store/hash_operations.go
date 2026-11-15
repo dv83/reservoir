@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"strconv"
 	"sync/atomic"
 	"unsafe"
 
@@ -10,8 +11,13 @@ import (
 
 // Hash operations for the LockFreeStore
 
-func (s *LockFreeStore) HSet(key string, fieldValues ...string) (int64, error) {
+func (s *LockFreeStore) HSet(key string, fieldValues ...string) (logN int64, logErr error) {
 	s.expireIfNeeded(key)
+	defer func() {
+		if logErr == nil {
+			s.logContainerOp("HSET", key, fieldValues...)
+		}
+	}()
 	if len(fieldValues)%2 != 0 {
 		return 0, errors.New("wrong number of arguments for hash set")
 	}
@@ -140,8 +146,13 @@ func (s *LockFreeStore) HMGet(key string, fields ...string) ([]string, []bool, e
 }
 
 // HDel deletes field(s) from a hash
-func (s *LockFreeStore) HDel(key string, fields ...string) (int64, error) {
+func (s *LockFreeStore) HDel(key string, fields ...string) (logN int64, logErr error) {
 	s.expireIfNeeded(key)
+	defer func() {
+		if logErr == nil && logN > 0 {
+			s.logContainerOp("HDEL", key, fields...)
+		}
+	}()
 	if len(fields) == 0 {
 		return 0, nil
 	}
@@ -290,8 +301,13 @@ func (s *LockFreeStore) HGetAll(key string) ([]string, error) {
 }
 
 // HIncrBy increments a field's integer value
-func (s *LockFreeStore) HIncrBy(key, field string, increment int64) (int64, error) {
+func (s *LockFreeStore) HIncrBy(key, field string, increment int64) (logN int64, logErr error) {
 	s.expireIfNeeded(key)
+	defer func() {
+		if logErr == nil {
+			s.logContainerOp("HSET", key, field, strconv.FormatInt(logN, 10))
+		}
+	}()
 	shard := s.getShard(key)
 
 	shard.mu.Lock()
@@ -353,8 +369,16 @@ func (s *LockFreeStore) HIncrBy(key, field string, increment int64) (int64, erro
 }
 
 // HIncrByFloat increments a field's float value
-func (s *LockFreeStore) HIncrByFloat(key, field string, increment float64) (float64, error) {
+func (s *LockFreeStore) HIncrByFloat(key, field string, increment float64) (logF float64, logErr error) {
 	s.expireIfNeeded(key)
+	defer func() {
+		// Log the field as stored, so replay reproduces its exact formatting.
+		if logErr == nil && atomic.LoadUint64(&s.localOrigin) == 0 {
+			if v, ok, _ := s.HGet(key, field); ok {
+				s.logContainerOp("HSET", key, field, v)
+			}
+		}
+	}()
 	shard := s.getShard(key)
 
 	shard.mu.Lock()

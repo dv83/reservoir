@@ -111,6 +111,20 @@ func New(cfg *config.Config) (*Server, error) {
 					return err
 				}
 				return nil
+			case "LPUSH", "RPUSH", "LPUSHX", "RPUSHX", "LPUSHUNIQUE", "RPUSHUNIQUE",
+				"LPOP", "RPOP", "LSET", "LREM", "LTRIM":
+				// Standalone list writes are logged with their arguments and
+				// replayed through the same method; in-order replay on the same
+				// state reproduces the list exactly.
+				return replayListOp(kvStore, entry.Operation, string(entry.Key), membersFromReplData(entry.Value))
+			case "LDELTA":
+				// Cluster list CRDT changes: replaying the deltas keeps the
+				// element ids peers know.
+				d, err := decodeListDelta(entry.Value)
+				if err != nil {
+					return nil // skip a corrupt entry rather than abort recovery
+				}
+				return kvStore.ApplyListDelta(string(entry.Key), d)
 			case "INCR", "INCRBY", "DECR", "DECRBY":
 				// Value contains the final result after increment/decrement
 				return kvStore.Set(string(entry.Key), string(entry.Value))
@@ -418,4 +432,61 @@ func (s *Server) acceptLoop() {
 			s.handleConnection(conn)
 		}()
 	}
+}
+
+// replayListOp re-applies one logged standalone list write during recovery.
+// args are the logged arguments after the key. A malformed entry is skipped.
+func replayListOp(kvStore store.KVStore, op, key string, args []string) error {
+	num := func(i int) (int64, bool) {
+		if i >= len(args) {
+			return 0, false
+		}
+		n, err := strconv.ParseInt(args[i], 10, 64)
+		return n, err == nil
+	}
+	var err error
+	switch op {
+	case "LPUSH":
+		_, err = kvStore.LPush(key, args...)
+	case "RPUSH":
+		_, err = kvStore.RPush(key, args...)
+	case "LPUSHX":
+		_, err = kvStore.LPushX(key, args...)
+	case "RPUSHX":
+		_, err = kvStore.RPushX(key, args...)
+	case "LPUSHUNIQUE":
+		_, err = kvStore.LPushUnique(key, args...)
+	case "RPUSHUNIQUE":
+		_, err = kvStore.RPushUnique(key, args...)
+	case "LPOP", "RPOP":
+		n, ok := num(0)
+		if !ok {
+			return nil
+		}
+		if op == "LPOP" {
+			_, err = kvStore.LPop(key, int(n))
+		} else {
+			_, err = kvStore.RPop(key, int(n))
+		}
+	case "LSET":
+		idx, ok := num(0)
+		if !ok || len(args) < 2 {
+			return nil
+		}
+		err = kvStore.LSet(key, idx, args[1])
+	case "LREM":
+		cnt, ok := num(0)
+		if !ok || len(args) < 2 {
+			return nil
+		}
+		_, err = kvStore.LRem(key, cnt, args[1])
+	case "LTRIM":
+		start, ok1 := num(0)
+		stop, ok2 := num(1)
+		if !ok1 || !ok2 {
+			return nil
+		}
+		err = kvStore.LTrim(key, start, stop)
+	}
+	return err
 }

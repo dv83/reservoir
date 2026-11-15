@@ -10,8 +10,13 @@ import (
 
 // Set operations for the LockFreeStore
 
-func (s *LockFreeStore) SAdd(key string, members ...string) (int64, error) {
+func (s *LockFreeStore) SAdd(key string, members ...string) (logN int64, logErr error) {
 	s.expireIfNeeded(key)
+	defer func() {
+		if logErr == nil && logN > 0 {
+			s.logContainerOp("SADD", key, members...)
+		}
+	}()
 	if len(members) == 0 {
 		return 0, nil
 	}
@@ -81,8 +86,13 @@ func (s *LockFreeStore) SAdd(key string, members ...string) (int64, error) {
 }
 
 // SRem removes one or more members from a set
-func (s *LockFreeStore) SRem(key string, members ...string) (int64, error) {
+func (s *LockFreeStore) SRem(key string, members ...string) (logN int64, logErr error) {
 	s.expireIfNeeded(key)
+	defer func() {
+		if logErr == nil && logN > 0 {
+			s.logContainerOp("SREM", key, members...)
+		}
+	}()
 	if len(members) == 0 {
 		return 0, nil
 	}
@@ -193,8 +203,13 @@ func (s *LockFreeStore) SMembers(key string) ([]string, error) {
 }
 
 // SPop removes and returns a random member from the set
-func (s *LockFreeStore) SPop(key string) (string, bool, error) {
+func (s *LockFreeStore) SPop(key string) (logV string, logOK bool, logErr error) {
 	s.expireIfNeeded(key)
+	defer func() {
+		if logErr == nil && logOK {
+			s.logContainerOp("SREM", key, logV)
+		}
+	}()
 	shard := s.getShard(key)
 
 	shard.mu.Lock()
@@ -394,6 +409,13 @@ func (s *LockFreeStore) SDiffStore(destination string, keys ...string) (int64, e
 	storedValue.SetVal = resultSet
 	if err := s.SetStoredValue(destination, storedValue); err != nil {
 		return 0, err
+	}
+
+	// The destination is overwritten: log it as a delete plus the result, so
+	// replay neither keeps old members nor depends on the source sets.
+	s.logDelete(destination)
+	if len(diff) > 0 {
+		s.logContainerOpAlways("SADD", destination, diff...)
 	}
 
 	return int64(len(diff)), nil

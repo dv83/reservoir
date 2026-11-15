@@ -510,6 +510,46 @@ func (s *LockFreeStore) logStringWrite(shard *LockFreeShard, op, key, value stri
 	}
 }
 
+// logContainerOp logs a plain (unstamped) list, set or hash write on a
+// standalone node as op with the null-separated "key\x00arg..." payload the
+// replication layer also uses; recovery replays it through the same store
+// method. On cluster nodes it does nothing: the stamped LWW path that follows
+// every client write logs it there (and lists log CRDT deltas instead), so
+// logging the plain call too would write each op twice.
+func (s *LockFreeStore) logContainerOp(op, key string, args ...string) {
+	if atomic.LoadUint64(&s.localOrigin) != 0 {
+		return
+	}
+	s.logContainerOpAlways(op, key, args...)
+}
+
+// logContainerOpAlways is logContainerOp for writes that no stamped path logs on
+// cluster nodes either (SDIFFSTORE).
+func (s *LockFreeStore) logContainerOpAlways(op, key string, args ...string) {
+	if atomic.LoadUint32(&s.commitLogActive) != 1 || atomic.LoadUint32(&s.recoveryActive) != 0 {
+		return
+	}
+	cl, ok := s.commitLog.(CommitLogger)
+	if !ok || cl == nil {
+		return
+	}
+	payload := key
+	for _, a := range args {
+		payload += "\x00" + a
+	}
+	cl.Write(op, []byte(key), []byte(payload))
+}
+
+// logDelete logs a delete entry for key (compaction treats it as a reset).
+func (s *LockFreeStore) logDelete(key string) {
+	if atomic.LoadUint32(&s.commitLogActive) != 1 || atomic.LoadUint32(&s.recoveryActive) != 0 {
+		return
+	}
+	if cl, ok := s.commitLog.(CommitLogger); ok && cl != nil {
+		cl.Delete([]byte(key))
+	}
+}
+
 // SetExpiry - встановлення expiry для існуючого ключа
 func (s *LockFreeStore) SetExpiry(key string, expireTime time.Time) bool {
 	s.expireIfNeeded(key)

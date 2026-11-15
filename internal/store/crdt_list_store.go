@@ -1,11 +1,14 @@
 package store
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"sync/atomic"
 	"time"
 
 	pkgErrors "reservoir/pkg/errors"
+	"reservoir/pkg/logger"
 	"reservoir/pkg/types"
 )
 
@@ -169,6 +172,7 @@ func (s *LockFreeStore) pushCRDT(key string, prepend bool, elements ...string) (
 		changed = append(changed, e)
 	}
 	list.rematerialize(changed)
+	s.logListChanges(key, list, changed)
 	s.commitListWrite(shard, key, list, sv, existed)
 	return int64(r.length()), nil
 }
@@ -202,6 +206,7 @@ func (s *LockFreeStore) pushXCRDT(key string, prepend bool, elements ...string) 
 		changed = append(changed, e)
 	}
 	list.rematerialize(changed)
+	s.logListChanges(key, list, changed)
 	s.commitListWrite(shard, key, list, sv, true)
 	return int64(r.length()), nil
 }
@@ -241,6 +246,7 @@ func (s *LockFreeStore) pushUniqueCRDT(key string, prepend bool, elements ...str
 		return 0, nil
 	}
 	list.rematerialize(changed)
+	s.logListChanges(key, list, changed)
 	s.commitListWrite(shard, key, list, sv, existed)
 	return int64(r.length()), nil
 }
@@ -288,6 +294,7 @@ func (s *LockFreeStore) popCRDT(key string, count int, fromHead bool) ([]string,
 		changed = append(changed, e)
 	}
 	list.rematerialize(changed)
+	s.logListChanges(key, list, changed)
 	s.finishListDelete(shard, key, list, sv, r)
 	return popped, nil
 }
@@ -320,6 +327,7 @@ func (s *LockFreeStore) lsetCRDT(key string, index int64, element string) error 
 	r.setValue(target.id, element, stamp)
 	target.value, target.valStamp, target.deleted = element, stamp, false
 	list.rematerialize([]rgaElem{target})
+	s.logListChanges(key, list, []rgaElem{target})
 	s.commitListWrite(shard, key, list, sv, true)
 	return nil
 }
@@ -379,6 +387,7 @@ func (s *LockFreeStore) lremCRDT(key string, count int64, element string) (int64
 		return 0, nil
 	}
 	list.rematerialize(changed)
+	s.logListChanges(key, list, changed)
 	s.finishListDelete(shard, key, list, sv, r)
 	return int64(len(changed)), nil
 }
@@ -433,6 +442,7 @@ func (s *LockFreeStore) ltrimCRDT(key string, start, stop int64) error {
 		return nil
 	}
 	list.rematerialize(changed)
+	s.logListChanges(key, list, changed)
 	s.finishListDelete(shard, key, list, sv, r)
 	return nil
 }
@@ -466,6 +476,40 @@ func (lv *ListValue) fullDelta() *ListDelta {
 	}
 	d = lv.withGen(d)
 	return &d
+}
+
+// logListChanges logs the descriptors of elements a local list op changed; see
+// logListDelta. The caller holds the shard lock.
+func (s *LockFreeStore) logListChanges(key string, list *ListValue, changed []rgaElem) {
+	if len(changed) == 0 || atomic.LoadUint32(&s.commitLogActive) != 1 || atomic.LoadUint32(&s.recoveryActive) != 0 {
+		return
+	}
+	elems := make([]ListElemDesc, len(changed))
+	for i, e := range changed {
+		elems[i] = descFromElem(e)
+	}
+	s.logListDelta(key, list, elems)
+}
+
+// logListDelta logs list CRDT element changes as an LDELTA entry — the
+// gob-encoded descriptors plus the list's generation, the format replication
+// uses — so recovery rebuilds the list with the element ids its peers know
+// (replaying plain list ops would mint new ids, and anti-entropy would then
+// duplicate every element). The caller holds the shard lock.
+func (s *LockFreeStore) logListDelta(key string, list *ListValue, elems []ListElemDesc) {
+	if len(elems) == 0 || atomic.LoadUint32(&s.commitLogActive) != 1 || atomic.LoadUint32(&s.recoveryActive) != 0 {
+		return
+	}
+	cl, ok := s.commitLog.(CommitLogger)
+	if !ok || cl == nil {
+		return
+	}
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(list.withGen(ListDelta{Elems: elems})); err != nil {
+		logger.Warning("commit log: failed to encode list delta for %s: %v", key, err)
+		return
+	}
+	cl.Write("LDELTA", []byte(key), buf.Bytes())
 }
 
 // DrainListDelta returns and clears the pending replication descriptors for a
@@ -545,6 +589,7 @@ func (s *LockFreeStore) ApplyListDelta(key string, delta ListDelta) error {
 	list.mu.Lock()
 	list.deque = newDeque
 	list.mu.Unlock()
+	s.logListDelta(key, list, delta.Elems)
 
 	if r.length() == 0 && len(r.elems) == 0 {
 		if existed {
