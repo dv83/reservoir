@@ -187,3 +187,12 @@ Options for Phase 2:
 
 Which one depends on the workload: many small keys point to option 2, large
 values with a hot subset to option 1.
+
+### Decision 6 (task 4.1): Phase 2 is an embedded LSM engine
+
+The target workload is a very large number of small keys. Phase 1 keeps every
+key in RAM at about 180 bytes per key and never spills values under 64 bytes,
+so it cannot serve that workload at any budget. Phase 2 therefore moves keys as
+well as values to disk with an embedded LSM engine; it is planned as its own
+change, `add-lsm-storage`. Phase 1 stays as the in-memory engine's way to hold
+large values beyond RAM.

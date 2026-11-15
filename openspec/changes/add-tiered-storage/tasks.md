@@ -26,4 +26,4 @@
 
 ## 4. Decide Phase 2
 
-- [ ] 4.1 Review Phase 1 hit rate, latency and index size, and decide on container tiering or an embedded LSM engine
+- [x] 4.1 Review Phase 1 hit rate, latency and index size, and decide on container tiering or an embedded LSM engine
