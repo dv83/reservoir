@@ -9,7 +9,7 @@
 ## 2. Phase 0: make the log a safe value store
 
 - [x] 2.1 Complete fix-compaction-state-loss
-- [ ] 2.2 Replace dropping on a full write channel with backpressure, and test that no acknowledged write is lost
+- [x] 2.2 Replace dropping on a full write channel with backpressure, and test that no acknowledged write is lost
 - [ ] 2.3 Make compaction a streaming merge with bounded memory
 - [x] 2.4 Persist lists, and sets and hashes on standalone nodes
 

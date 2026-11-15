@@ -136,6 +136,16 @@ type CommitLog struct {
 	compactedBytes int64
 	droppedEntries int64
 
+	// sendMu guards sendClosed against in-flight senders: Write and Delete hold
+	// it (read) across a blocking send, and Close takes it (write) before
+	// stopping the writer, so every entry accepted before Close is written. The
+	// writer never takes it, so it keeps draining while senders wait.
+	sendMu     sync.RWMutex
+	sendClosed bool
+
+	// compacting is set while a compaction runs off the writer goroutine.
+	compacting int32
+
 	// lastTimestamp is the timestamp of the most recently created entry; see
 	// nextTimestamp.
 	lastTimestamp int64
@@ -156,7 +166,7 @@ func NewCommitLog(dataDir string) (*CommitLog, error) {
 	cl := &CommitLog{
 		dataDir:        dataDir,
 		maxSegmentSize: MaxSegmentSize,
-		writeChan:      make(chan *Entry, 100000), // 100K buffer
+		writeChan:      make(chan *Entry, writeChanCapacity),
 		batchBuffer:    make([]*Entry, 0, BatchSize),
 		compactionChan: make(chan struct{}, 1),
 		shutdownChan:   make(chan struct{}),
@@ -176,19 +186,31 @@ func NewCommitLog(dataDir string) (*CommitLog, error) {
 	return cl, nil
 }
 
-// WriteTimeout is the maximum time to wait for the write channel
-const WriteTimeout = 100 * time.Millisecond
+// writeChanCapacity is the write channel's buffer. When it is full, Write and
+// Delete block until the writer drains it (backpressure) instead of dropping
+// the entry. A variable so tests can make it small.
+var writeChanCapacity = 100000
+
+// flushHook, when set (tests only), runs at the start of every batch flush.
+var flushHook func()
+
+// enqueue hands an entry to the writer, blocking while the channel is full. An
+// acknowledged write is therefore never dropped; under sustained overload the
+// callers slow down to the disk's pace instead.
+func (cl *CommitLog) enqueue(entry *Entry) error {
+	cl.sendMu.RLock()
+	defer cl.sendMu.RUnlock()
+	if cl.sendClosed {
+		return errors.New("commit log is closed")
+	}
+	cl.writeChan <- entry
+	atomic.AddInt64(&cl.totalEntries, 1)
+	return nil
+}
 
 // Write writes an entry to the commit log with a short timeout
 // Returns error if the entry could not be queued
 func (cl *CommitLog) Write(operation string, key []byte, value []byte) error {
-	cl.mu.RLock()
-	if cl.closed {
-		cl.mu.RUnlock()
-		return errors.New("commit log is closed")
-	}
-	cl.mu.RUnlock()
-
 	if err := validateEntrySizes(operation, key, value); err != nil {
 		return err
 	}
@@ -204,29 +226,11 @@ func (cl *CommitLog) Write(operation string, key []byte, value []byte) error {
 	// Calculate CRC
 	entry.CRC = entry.CalculateCRC()
 
-	// Send to write channel with timeout
-	select {
-	case cl.writeChan <- entry:
-		atomic.AddInt64(&cl.totalEntries, 1)
-		return nil
-	case <-time.After(WriteTimeout):
-		// Channel full after timeout - this indicates serious backpressure
-		atomic.AddInt64(&cl.droppedEntries, 1)
-		dropped := atomic.LoadInt64(&cl.droppedEntries)
-		logger.Error("Commit log write channel full after %v, dropping entry (total dropped: %d)", WriteTimeout, dropped)
-		return errors.New("commit log write channel full")
-	}
+	return cl.enqueue(entry)
 }
 
 // Delete asynchronously writes a delete entry to the commit log
 func (cl *CommitLog) Delete(key []byte) {
-	cl.mu.RLock()
-	if cl.closed {
-		cl.mu.RUnlock()
-		return
-	}
-	cl.mu.RUnlock()
-
 	entry := &Entry{
 		Type:      EntryTypeDelete,
 		Timestamp: cl.nextTimestamp(),
@@ -237,12 +241,8 @@ func (cl *CommitLog) Delete(key []byte) {
 	// Calculate CRC
 	entry.CRC = entry.CalculateCRC()
 
-	// Send to write channel (non-blocking)
-	select {
-	case cl.writeChan <- entry:
-		atomic.AddInt64(&cl.totalEntries, 1)
-	default:
-		logger.Warning("Commit log write channel full, dropping delete entry")
+	if err := cl.enqueue(entry); err != nil {
+		logger.Debug("Commit log delete not logged: %v", err)
 	}
 }
 
@@ -270,8 +270,10 @@ func (cl *CommitLog) writeWorker() {
 			}
 
 		case <-cl.compactionChan:
-			// Trigger compaction
-			cl.compact()
+			// Compact off this goroutine: while it ran here nothing drained
+			// the write channel, and with backpressure every write would stall
+			// for the whole compaction.
+			cl.startCompaction()
 
 		case <-cl.shutdownChan:
 			// Immediate shutdown requested
@@ -306,6 +308,9 @@ func (cl *CommitLog) writeWorker() {
 func (cl *CommitLog) flushBatch() {
 	if len(cl.batchBuffer) == 0 {
 		return
+	}
+	if flushHook != nil {
+		flushHook()
 	}
 
 	cl.mu.Lock()
@@ -539,6 +544,21 @@ func (cl *CommitLog) compactionWorker() {
 	}
 }
 
+// startCompaction runs one compaction in the background unless one is already
+// running. Compaction rewrites only closed segments, which the writer never
+// touches; Close waits for it through wg.
+func (cl *CommitLog) startCompaction() {
+	if !atomic.CompareAndSwapInt32(&cl.compacting, 0, 1) {
+		return
+	}
+	cl.wg.Add(1)
+	go func() {
+		defer cl.wg.Done()
+		defer atomic.StoreInt32(&cl.compacting, 0)
+		cl.compact()
+	}()
+}
+
 // compact performs log compaction
 func (cl *CommitLog) compact() {
 	compactor := NewCompactor(cl.dataDir)
@@ -550,7 +570,9 @@ func (cl *CommitLog) compact() {
 	if err := compactor.Compact(currentSegmentID); err != nil {
 		logger.Error("Compaction failed: %v", err)
 	} else {
+		cl.mu.Lock()
 		cl.lastCompaction = time.Now()
+		cl.mu.Unlock()
 		// Update compacted bytes stats
 		atomic.AddInt64(&cl.compactedBytes, compactor.lastCompaction.Unix()) // Placeholder
 	}
@@ -558,6 +580,12 @@ func (cl *CommitLog) compact() {
 
 // Close closes the commit log
 func (cl *CommitLog) Close() error {
+	// Stop accepting entries, after every in-flight send has been queued (the
+	// writer is still draining, so those sends complete).
+	cl.sendMu.Lock()
+	cl.sendClosed = true
+	cl.sendMu.Unlock()
+
 	cl.mu.Lock()
 	if cl.closed {
 		cl.mu.Unlock()
@@ -610,6 +638,8 @@ func (cl *CommitLog) Close() error {
 
 // Stats returns commit log statistics
 func (cl *CommitLog) Stats() map[string]interface{} {
+	cl.mu.RLock()
+	defer cl.mu.RUnlock()
 	return map[string]interface{}{
 		"total_entries":   atomic.LoadInt64(&cl.totalEntries),
 		"total_bytes":     atomic.LoadInt64(&cl.totalBytes),
