@@ -44,7 +44,7 @@ func TestCompactionMemoryIsBoundedByKeys(t *testing.T) {
 	}
 }
 
-// peakHeapGrowth runs fn while sampling the heap and returns how far the heap
+// peakHeapGrowth runs fn while sampling the live heap and returns how far it
 // grew above its level before fn started.
 func peakHeapGrowth(fn func()) int64 {
 	runtime.GC()
@@ -57,6 +57,10 @@ func peakHeapGrowth(fn func()) int64 {
 		defer close(done)
 		var m runtime.MemStats
 		for {
+			// Collect first, so the reading is live memory: garbage the GC has
+			// not caught up with (common when the machine is busy) is not what
+			// these tests bound.
+			runtime.GC()
 			runtime.ReadMemStats(&m)
 			for {
 				p := atomic.LoadUint64(&peak)
