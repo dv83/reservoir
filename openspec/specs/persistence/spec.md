@@ -1,7 +1,7 @@
 # Persistence Specification
 
 ## Purpose
-Defines the write-ahead commit log that lets a node rebuild its data after a restart. Lists are not persisted, and sets and hashes are persisted only in cluster mode.
+Defines the write-ahead commit log that lets a node rebuild its data — strings, counters, TTLs, lists, sets and hashes — after a restart.
 
 ## Requirements
 
