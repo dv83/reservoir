@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -28,7 +29,20 @@ import (
 const (
 	lsmKindValue  = 'v'
 	lsmKindGlobal = 'g'
+	lsmKindExpiry = 'x'
 )
+
+// expiryKey is an expiry-index entry: x | deadline (unix nanos, big endian, so
+// entries sort by time) | shard | key. Entries may be stale — the key's TTL
+// was changed or removed since — and the reaper checks the key's record
+// before acting, so a flush only ever adds entries.
+func expiryKey(deadline int64, shard byte, key string) []byte {
+	b := make([]byte, 0, 10+len(key))
+	b = append(b, lsmKindExpiry)
+	b = binary.BigEndian.AppendUint64(b, uint64(deadline))
+	b = append(b, shard)
+	return append(b, key...)
+}
 
 // flushStampKey holds the newest stamped FLUSHALL, the reset point floor of
 // every key.
@@ -144,6 +158,9 @@ func (s *LockFreeStore) EnableLSM(dir string, opts lsmengine.Options) error {
 		}
 		s.flushStamp = f
 	}
+	s.lsmStop = make(chan struct{})
+	s.lsmDone = make(chan struct{})
+	go s.lsmReaperLoop(s.lsmStop, s.lsmDone)
 	logger.Info("LSM storage enabled in %s (%d keys on disk)", dir, total)
 	return nil
 }
@@ -458,6 +475,9 @@ func (s *LockFreeStore) flushShard(sh *LockFreeShard) {
 			continue
 		}
 		b.Set(valueKey(sh.idx, key), enc)
+		if r.deadline != 0 {
+			b.Set(expiryKey(r.deadline, sh.idx, key), nil)
+		}
 	}
 	sh.expiryMu.RUnlock()
 	if err := s.engine.Commit(b); err != nil {
@@ -479,9 +499,78 @@ func (s *LockFreeStore) clearEngine() {
 }
 
 func (s *LockFreeStore) closeLSM() {
+	if s.lsmStop != nil {
+		close(s.lsmStop)
+		<-s.lsmDone
+		s.lsmStop = nil
+	}
 	if s.engine != nil {
 		if err := s.engine.Close(); err != nil {
 			logger.Error("LSM storage: close failed: %v", err)
 		}
 	}
+}
+
+// lsmReapInterval is how often the expiry index is scanned.
+const lsmReapInterval = time.Second
+
+// lsmReapBatch bounds the keys reclaimed per pass, so one pass never holds up
+// writers for long.
+const lsmReapBatch = 10000
+
+// lsmReaperLoop reclaims expired keys that are not in the cache — the
+// in-memory reaper only sees cached deadlines.
+func (s *LockFreeStore) lsmReaperLoop(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	t := time.NewTicker(lsmReapInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			for s.reapExpiryIndex(time.Now(), lsmReapBatch) == lsmReapBatch {
+			}
+		}
+	}
+}
+
+// reapExpiryIndex reclaims up to max keys whose index entry is due by now and
+// removes those entries. It returns how many entries it processed.
+func (s *LockFreeStore) reapExpiryIndex(now time.Time, max int) int {
+	type due struct {
+		entry []byte
+		shard byte
+		key   string
+	}
+	var batch []due
+	limit := uint64(now.UnixNano())
+	err := s.engine.ScanPrefix([]byte{lsmKindExpiry}, func(k, _ []byte) bool {
+		if len(k) < 10 || binary.BigEndian.Uint64(k[1:9]) > limit || len(batch) >= max {
+			return false
+		}
+		batch = append(batch, due{entry: append([]byte(nil), k...), shard: k[9], key: string(k[10:])})
+		return true
+	})
+	if err != nil {
+		logger.Error("LSM storage: expiry index scan failed: %v", err)
+		return 0
+	}
+	if len(batch) == 0 {
+		return 0
+	}
+	for _, d := range batch {
+		// reapExpired loads the key's record and acts only if its current
+		// deadline has passed, so stale entries are harmless.
+		reapExpired(s, s.shards[d.shard], d.key)
+	}
+	b := s.engine.NewBatch()
+	for _, d := range batch {
+		b.Delete(d.entry)
+	}
+	if err := s.engine.Commit(b); err != nil {
+		logger.Error("LSM storage: expiry index cleanup failed: %v", err)
+	}
+	atomic.AddInt64(&s.lsmReaped, int64(len(batch)))
+	return len(batch)
 }

@@ -128,7 +128,11 @@ type LockFreeStore struct {
 	evictions int64
 	// lsmStartedWarm: the engine held keys at start, so the cache is partial.
 	lsmStartedWarm bool
-	_              [16]byte // padding до cache line boundary
+	// LSM expiry-index reaper (lsm.go): stop/done channels and entries handled.
+	lsmStop   chan struct{}
+	lsmDone   chan struct{}
+	lsmReaped int64
+	_         [16]byte // padding до cache line boundary
 }
 
 // SetLocalOrigin records this node's origin id so INCR/DECR maintain the PN
