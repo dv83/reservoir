@@ -2,6 +2,7 @@ package store
 
 import (
 	pkgErrors "reservoir/pkg/errors"
+	"reservoir/pkg/types"
 )
 
 // pnCounter is a positive-negative counter CRDT. Each node accumulates its own
@@ -24,6 +25,9 @@ type pnCounter struct {
 	Base int64
 	P    map[uint64]int64
 	N    map[uint64]int64
+	// gen is the reset point this incarnation was created after (see
+	// crdt_reset.go); state of another generation is never max-merged into it.
+	gen hlcStamp
 }
 
 func newPNCounter() *pnCounter {
@@ -75,7 +79,7 @@ func (c *pnCounter) mergeFrom(o *pnCounter) {
 // clone returns a deep copy, so a snapshot handed to replication or anti-entropy
 // cannot be mutated by later local ops.
 func (c *pnCounter) clone() *pnCounter {
-	cp := &pnCounter{Base: c.Base, P: make(map[uint64]int64, len(c.P)), N: make(map[uint64]int64, len(c.N))}
+	cp := &pnCounter{Base: c.Base, P: make(map[uint64]int64, len(c.P)), N: make(map[uint64]int64, len(c.N)), gen: c.gen}
 	for k, v := range c.P {
 		cp.P[k] = v
 	}
@@ -98,13 +102,25 @@ type CounterState struct {
 	Base int64
 	P    map[uint64]int64
 	N    map[uint64]int64
+	// GenP/GenL/GenO are the incarnation's generation stamp (zero for state
+	// from older senders or a counter never reset).
+	GenP int64
+	GenL uint32
+	GenO uint64
+}
+
+func (st CounterState) gen() hlcStamp {
+	return hlcStamp{TS: types.HLCTimestamp{Physical: st.GenP, Logical: st.GenL}, Origin: st.GenO}
 }
 
 // counterFor returns the pnCounter to update for a counter op on storedValue,
 // creating one (and seeding Base from an existing plain-int string) when the key
 // is not yet a counter. It reports WRONGTYPE for a non-string value and
 // ErrNotInteger for a non-numeric string. The caller holds the shard lock.
-func counterFor(storedValue *StoredValue, exists bool) (*pnCounter, error) {
+//
+// gen is the generation given to a newly created counter: the key's current
+// reset point.
+func counterFor(storedValue *StoredValue, exists bool, gen hlcStamp) (*pnCounter, error) {
 	if exists && storedValue != nil {
 		if !storedValue.IsString() {
 			return nil, pkgErrors.ErrWrongType
@@ -113,6 +129,7 @@ func counterFor(storedValue *StoredValue, exists bool) (*pnCounter, error) {
 			return storedValue.counter, nil
 		}
 		ctr := newPNCounter()
+		ctr.gen = gen
 		if storedValue.StringVal != "" {
 			base, err := parseIntegerStrict(storedValue.StringVal)
 			if err != nil {
@@ -122,7 +139,9 @@ func counterFor(storedValue *StoredValue, exists bool) (*pnCounter, error) {
 		}
 		return ctr, nil
 	}
-	return newPNCounter(), nil
+	ctr := newPNCounter()
+	ctr.gen = gen
+	return ctr, nil
 }
 
 // storeCounter writes a materialized counter value back under key, replacing the
@@ -164,7 +183,7 @@ func (s *LockFreeStore) CounterState(key string) (CounterState, bool) {
 		return CounterState{}, false
 	}
 	c := v.counter.clone()
-	return CounterState{Base: c.Base, P: c.P, N: c.N}, true
+	return CounterState{Base: c.Base, P: c.P, N: c.N, GenP: c.gen.TS.Physical, GenL: c.gen.TS.Logical, GenO: c.gen.Origin}, true
 }
 
 // MergeCounter folds a replicated PN-counter snapshot into the local counter
@@ -180,11 +199,34 @@ func (s *LockFreeStore) MergeCounter(key string, st CounterState) (int64, error)
 	defer shard.mu.Unlock()
 
 	storedValue, exists := shard.data[key]
-	ctr, err := counterFor(storedValue, exists)
+	in := st.gen()
+	r := s.resetPoint(shard, key)
+	current := func() int64 {
+		if exists && storedValue != nil && storedValue.counter != nil {
+			return storedValue.counter.value()
+		}
+		return 0
+	}
+	// State from before the key's last reset belongs to a deleted incarnation.
+	if r.After(in) {
+		return current(), nil
+	}
+	ctr, err := counterFor(storedValue, exists, r)
 	if err != nil {
 		return 0, err
 	}
-	ctr.mergeFrom(&pnCounter{Base: st.Base, P: st.P, N: st.N})
+	switch {
+	case in.After(ctr.gen):
+		// The sender saw a reset this node missed: learn it and adopt the
+		// sender's incarnation, dropping the local one.
+		raiseTombstone(shard, key, in)
+		ctr = &pnCounter{Base: st.Base, P: make(map[uint64]int64, len(st.P)), N: make(map[uint64]int64, len(st.N)), gen: in}
+		ctr.mergeFrom(&pnCounter{P: st.P, N: st.N})
+	case ctr.gen.After(in):
+		return current(), nil
+	default:
+		ctr.mergeFrom(&pnCounter{Base: st.Base, P: st.P, N: st.N})
+	}
 	s.storeCounter(shard, key, ctr, exists, storedValue)
 	return ctr.value(), nil
 }

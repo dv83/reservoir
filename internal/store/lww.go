@@ -65,7 +65,8 @@ func (s *LockFreeStore) SetWithHLC(key, value string, stamp hlcStamp) (bool, err
 	}
 	// Also drop it if the key was deleted more recently (a tombstone that is
 	// newer than this write), so a late older create cannot resurrect the key.
-	if tomb, ok := shard.tombstones[keyCopy]; ok && !stamp.After(tomb.stamp) {
+	// The reset point also covers a FLUSHALL (see crdt_reset.go).
+	if !stamp.After(s.resetPoint(shard, keyCopy)) {
 		shard.mu.Unlock()
 		return false, nil
 	}
@@ -126,26 +127,22 @@ func (s *LockFreeStore) DeleteWithHLC(key string, stamp hlcStamp) bool {
 		return false
 	}
 	// Drop it if an equal/newer tombstone already exists.
-	if tomb, ok := shard.tombstones[key]; ok && !stamp.After(tomb.stamp) {
+	if !stamp.After(s.resetPoint(shard, key)) {
 		shard.mu.Unlock()
 		return false
 	}
 
+	// Remove the key — or, for a set or hash holding elements written after
+	// this delete (they arrived first), prune it down to those (see
+	// crdt_reset.go).
+	removed := false
 	if existed {
-		delete(shard.data, key)
-		shard.expiryMu.Lock()
-		delete(shard.expiry, key)
-		shard.expiryMu.Unlock()
+		removed, _ = s.applyReset(shard, key, stamp)
 	}
 	shard.tombstones[key] = tombstone{stamp: stamp, deleted: time.Now()}
 	shard.mu.Unlock()
 
-	if existed {
-		var freed int64
-		if oldValue != nil {
-			freed = oldValue.MemoryUsage()
-		}
-		s.accountKeyRemoved(shard, freed)
+	if removed {
 		if atomic.LoadUint32(&s.commitLogActive) == 1 && atomic.LoadUint32(&s.recoveryActive) == 0 {
 			if cl, ok := s.commitLog.(CommitLogger); ok {
 				cl.Delete([]byte(key))
@@ -267,6 +264,9 @@ type LWWShardEntry struct {
 	// nanos) or PERSIST (Deadline 0), at the stamp, reconciled by LWW.
 	TTL      bool
 	Deadline int64
+	// Flush marks the node's newest stamped FLUSHALL (Key empty), so a peer that
+	// missed it still flushes (see crdt_reset.go).
+	Flush bool
 }
 
 // ShardCount returns the number of shards, so callers can iterate them.
@@ -283,7 +283,12 @@ func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	entries := make([]LWWShardEntry, 0, len(shard.data)+len(shard.tombstones))
+	entries := make([]LWWShardEntry, 0, len(shard.data)+len(shard.tombstones)+1)
+	// The flush stamp comes first, so a peer applies it before the entries
+	// that follow.
+	if p, l, o, ok := s.FlushStampLWW(); ok {
+		entries = append(entries, LWWShardEntry{Flush: true, Physical: p, Logical: l, Origin: o})
+	}
 	for k, v := range shard.data {
 		if v == nil {
 			continue
@@ -297,7 +302,7 @@ func (s *LockFreeStore) ShardLWWDigest(shardIdx int) []LWWShardEntry {
 				c := v.counter.clone()
 				entries = append(entries, LWWShardEntry{
 					Key:     k,
-					Counter: &CounterState{Base: c.Base, P: c.P, N: c.N},
+					Counter: &CounterState{Base: c.Base, P: c.P, N: c.N, GenP: c.gen.TS.Physical, GenL: c.gen.TS.Logical, GenO: c.gen.Origin},
 				})
 			} else {
 				entries = append(entries, LWWShardEntry{

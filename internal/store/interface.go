@@ -24,6 +24,10 @@ type KVStore interface {
 	GetLWW(key string) (physical int64, logical uint32, origin uint64, ok bool)
 	ShardCount() int
 	ShardLWWDigest(shardIdx int) []LWWShardEntry
+	// FlushLWW applies a stamped FLUSHALL; FlushStampLWW reports the newest one
+	// applied (see crdt_reset.go).
+	FlushLWW(physical int64, logical uint32, origin uint64)
+	FlushStampLWW() (physical int64, logical uint32, origin uint64, ok bool)
 	Get(key string) (string, bool)
 	Delete(key string) bool
 	Clear()

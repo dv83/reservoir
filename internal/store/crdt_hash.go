@@ -192,6 +192,12 @@ func (s *LockFreeStore) HSetLWW(key string, physical int64, logical uint32, orig
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
+	// A write from before the key's last reset (DEL, FLUSHALL, expiry) must not
+	// undo it.
+	if !stamp.After(s.resetPoint(shard, key)) {
+		return 0, nil
+	}
+
 	storedValue, ok := shard.data[key]
 	var hashValue *HashValue
 	existed := false
@@ -234,6 +240,12 @@ func (s *LockFreeStore) HDelLWW(key string, physical int64, logical uint32, orig
 	shard := s.getShard(key)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
+
+	// A write from before the key's last reset (DEL, FLUSHALL, expiry) must not
+	// undo it.
+	if !stamp.After(s.resetPoint(shard, key)) {
+		return 0, nil
+	}
 
 	storedValue, ok := shard.data[key]
 	var hashValue *HashValue

@@ -86,6 +86,8 @@ func reconcile(into *StoreReplicationHandler, from *StoreReplicationHandler) {
 			var op string
 			value := e.Value
 			switch {
+			case e.Flush:
+				op = "FLUSHALL"
 			case e.Counter:
 				op = "COUNTER"
 			case e.List:

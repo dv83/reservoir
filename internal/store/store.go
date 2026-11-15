@@ -101,7 +101,11 @@ type LockFreeStore struct {
 	recoveryActive    uint32             // 4 bytes - atomic flag for recovery mode
 	localOrigin       uint64             // 8 bytes - atomic; this node's id for the counter CRDT (0 = non-cluster, plain INCR)
 	listSeq           uint64             // 8 bytes - atomic; monotonic source for list CRDT element ids
-	_                 [16]byte           // padding до cache line boundary
+	// flushStamp is the newest stamped FLUSHALL applied (guarded by flushMu);
+	// it is every key's reset point floor (see crdt_reset.go).
+	flushMu    sync.RWMutex
+	flushStamp hlcStamp
+	_          [16]byte // padding до cache line boundary
 }
 
 // SetLocalOrigin records this node's origin id so INCR/DECR maintain the PN
@@ -241,7 +245,7 @@ func (s *LockFreeStore) DeleteFast(key string) bool {
 	shard.mu.Lock()
 	oldValue, existed := shard.data[key]
 	if existed {
-		recordExpiryTombstone(shard, key, oldValue)
+		recordExpiryTombstone(shard, key, oldValue, time.Time{})
 		delete(shard.data, key)
 	}
 	shard.mu.Unlock()
@@ -420,7 +424,7 @@ func (s *LockFreeStore) deleteExpiredAsync(shard *LockFreeShard, key string) {
 	shard.mu.Lock()
 	oldValue, existed := shard.data[key]
 	if existed {
-		recordExpiryTombstone(shard, key, oldValue)
+		recordExpiryTombstone(shard, key, oldValue, time.Time{})
 		delete(shard.data, key)
 	}
 	shard.mu.Unlock()

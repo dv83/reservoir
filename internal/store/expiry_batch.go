@@ -181,15 +181,17 @@ func reapExpired(store *LockFreeStore, shard *LockFreeShard, key string) bool {
 	oldValue, existed := shard.data[key]
 
 	stillExpired := false
+	var deadline time.Time
 	if existed {
 		shard.expiryMu.RLock()
 		exp, hasExp := shard.expiry[key]
 		shard.expiryMu.RUnlock()
 		stillExpired = hasExp && time.Now().After(exp)
+		deadline = exp
 	}
 
 	if stillExpired {
-		recordExpiryTombstone(shard, key, oldValue)
+		recordExpiryTombstone(shard, key, oldValue, deadline)
 		delete(shard.data, key)
 		shard.expiryMu.Lock()
 		delete(shard.expiry, key)

@@ -46,6 +46,13 @@ every node and is replicated unstamped.
   generation). Each shard digest carries the flush stamp, and reconcile calls
   `FlushLWW`, so a node that missed the event still flushes. An unstamped
   FLUSHALL (standalone, older senders) keeps today's `Clear()`.
+- **The cluster FLUSHALL handler does not call `Clear()`.** Clearing locally
+  would also remove writes stamped after the flush that arrived from a node with
+  a faster clock, which every peer keeps. The handler goes through
+  `replicateWrite`, which stamps the flush and applies `FlushLWW`.
+- **Commit log.** `FlushLWW` logs one FLUSHALL entry when nothing survived, and
+  per-key deletes otherwise, so a replay does not wipe the writes stamped after
+  the flush.
 - **Expiry tombstone for containers at the deadline.** Containers have no value
   stamp; reaping one records a tombstone at `(deadline, max logical, max
   origin)`, derived from the replicated TTL register and so identical on every

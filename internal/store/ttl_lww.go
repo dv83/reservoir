@@ -75,9 +75,22 @@ func (s *LockFreeStore) applyTTLAfterSet(shard *LockFreeShard, key string, stamp
 // expired the key yet (clock skew, reaper lag, or a missed EXPIRE) would hand the
 // same value back through anti-entropy and resurrect it — without its TTL. The
 // tombstone blocks exactly that value and anything older, while any strictly
-// newer write still wins. Values without a stamp (non-cluster writes, containers)
-// are left alone. The caller holds shard.mu.
-func recordExpiryTombstone(shard *LockFreeShard, key string, old *StoredValue) {
+// newer write still wins. Values without a stamp (non-cluster writes) are left
+// alone.
+//
+// Containers (sets, hashes, lists, counters) have no value stamp, and their
+// writes keep the TTL rather than clear it, so every write made before the
+// deadline belongs to the expired incarnation: their tombstone sits just before
+// the deadline (deadlineStamp), identical on every node because the deadline is
+// replicated. A zero deadline (unknown) leaves containers alone. The caller holds
+// shard.mu.
+func recordExpiryTombstone(shard *LockFreeShard, key string, old *StoredValue, deadline time.Time) {
+	if isResettableContainer(old) {
+		if !deadline.IsZero() {
+			raiseTombstone(shard, key, deadlineStamp(deadline))
+		}
+		return
+	}
 	if old == nil || old.hlc.TS.IsZero() {
 		return
 	}

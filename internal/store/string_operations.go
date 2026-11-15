@@ -269,7 +269,7 @@ func (s *LockFreeStore) IncrBy(key string, increment int64) (int64, error) {
 	// different nodes converge without losing any (see crdt_counter.go). The
 	// plain path below is kept for single-node use (localOrigin == 0).
 	if origin := atomic.LoadUint64(&s.localOrigin); origin != 0 {
-		ctr, err := counterFor(storedValue, exists)
+		ctr, err := counterFor(storedValue, exists, s.resetPoint(shard, key))
 		if err != nil {
 			return 0, err
 		}

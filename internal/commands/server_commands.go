@@ -180,12 +180,13 @@ func HandleZeroCopyInfo(kvStore store.KVStore, cmd *protocol.ZeroCopyCommand, wr
 
 // HandleZeroCopyFlushDBWithReplication processes FLUSHDB command with replication
 func HandleZeroCopyFlushDBWithReplication(kvStore store.KVStore, _ *protocol.ZeroCopyCommand, writer *bufio.Writer, replicationCallback ReplicationCallback) error {
-	// Clear the store
-	kvStore.Clear()
-
-	// Replicate FLUSHDB operation to other nodes
+	// In cluster mode the flush is a stamped reset applied through the
+	// replication path, so writes stamped after it (on any node) survive;
+	// standalone, it simply clears the store.
 	if replicationCallback != nil {
 		replicationCallback("FLUSHDB", "", nil)
+	} else {
+		kvStore.Clear()
 	}
 
 	_, err := writer.Write(okResponse)
@@ -194,12 +195,13 @@ func HandleZeroCopyFlushDBWithReplication(kvStore store.KVStore, _ *protocol.Zer
 
 // HandleZeroCopyFlushAllWithReplication processes FLUSHALL command with replication
 func HandleZeroCopyFlushAllWithReplication(kvStore store.KVStore, _ *protocol.ZeroCopyCommand, writer *bufio.Writer, replicationCallback ReplicationCallback) error {
-	// Clear the store
-	kvStore.Clear()
-
-	// Replicate FLUSHALL operation to other nodes
+	// In cluster mode the flush is a stamped reset applied through the
+	// replication path, so writes stamped after it (on any node) survive;
+	// standalone, it simply clears the store.
 	if replicationCallback != nil {
 		replicationCallback("FLUSHALL", "", nil)
+	} else {
+		kvStore.Clear()
 	}
 
 	_, err := writer.Write(okResponse)

@@ -586,6 +586,9 @@ type ListValue struct {
 	// pending accumulates the element descriptors changed since the last
 	// replication drain (cluster mode only).
 	pending []ListElemDesc `json:"-"`
+	// gen is the reset point this incarnation was created after (see
+	// crdt_reset.go); deltas of another generation are never merged into it.
+	gen hlcStamp `json:"-"`
 }
 
 // Elements returns the list elements as a slice (for JSON serialization)

@@ -301,6 +301,12 @@ func (s *Server) replicateWrite(operation, key string, value []byte) {
 		p, l, o := s.clusterManager.NextStamp()
 		s.kvStore.ExpireLWW(key, deadline, p, l, o)
 		s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
+	case "FLUSHALL", "FLUSHDB":
+		// A stamped reset: it removes everything written before it here and on
+		// every peer, and travels in the anti-entropy digest (see FlushLWW).
+		p, l, o := s.clusterManager.NextStamp()
+		s.kvStore.FlushLWW(p, l, o)
+		s.clusterManager.QueueReplicationLWW(operation, key, value, p, l, o)
 	case "DEFER", "DEFER.CANCEL":
 		// Deferred commands are owned by the node that accepted them: only that
 		// node executes them, and executeDeferred replicates the effect through

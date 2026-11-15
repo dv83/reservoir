@@ -29,6 +29,20 @@ type ListElemDesc struct {
 // full digest for anti-entropy.
 type ListDelta struct {
 	Elems []ListElemDesc
+	// GenP/GenL/GenO are the list incarnation's generation stamp (zero for
+	// deltas from older senders or a list never reset).
+	GenP int64
+	GenL uint32
+	GenO uint64
+}
+
+func (d ListDelta) gen() hlcStamp {
+	return hlcStamp{TS: types.HLCTimestamp{Physical: d.GenP, Logical: d.GenL}, Origin: d.GenO}
+}
+
+func (lv *ListValue) withGen(d ListDelta) ListDelta {
+	d.GenP, d.GenL, d.GenO = lv.gen.TS.Physical, lv.gen.TS.Logical, lv.gen.Origin
+	return d
 }
 
 func descFromElem(e rgaElem) ListElemDesc {
@@ -103,7 +117,9 @@ func (s *LockFreeStore) getListForWrite(shard *LockFreeShard, key string) (*List
 		}
 		return sv.ListVal, sv, true, nil
 	}
-	return NewListValue(), nil, false, nil
+	list := NewListValue()
+	list.gen = s.resetPoint(shard, key)
+	return list, nil, false, nil
 }
 
 // commitListWrite stores a new list or updates the memory accounting of an
@@ -444,11 +460,12 @@ func (lv *ListValue) fullDelta() *ListDelta {
 	if lv.rga == nil {
 		return nil
 	}
-	d := &ListDelta{Elems: make([]ListElemDesc, 0, len(lv.rga.elems))}
+	d := ListDelta{Elems: make([]ListElemDesc, 0, len(lv.rga.elems))}
 	for _, e := range lv.rga.elems {
 		d.Elems = append(d.Elems, descFromElem(*e))
 	}
-	return d
+	d = lv.withGen(d)
+	return &d
 }
 
 // DrainListDelta returns and clears the pending replication descriptors for a
@@ -461,7 +478,7 @@ func (s *LockFreeStore) DrainListDelta(key string) (ListDelta, bool) {
 	if !ok || sv.Type != ValueTypeList || sv.ListVal == nil || len(sv.ListVal.pending) == 0 {
 		return ListDelta{}, false
 	}
-	delta := ListDelta{Elems: sv.ListVal.pending}
+	delta := sv.ListVal.withGen(ListDelta{Elems: sv.ListVal.pending})
 	sv.ListVal.pending = nil
 	return delta, true
 }
@@ -481,14 +498,32 @@ func (s *LockFreeStore) ApplyListDelta(key string, delta ListDelta) error {
 	defer shard.mu.Unlock()
 
 	sv, existed := shard.data[key]
+	in := delta.gen()
+	// A delta from before the key's last reset belongs to a deleted incarnation.
+	if s.resetPoint(shard, key).After(in) {
+		return nil
+	}
 	var list *ListValue
 	if existed {
 		if sv.Type != ValueTypeList {
 			return pkgErrors.ErrWrongType
 		}
 		list = sv.ListVal
+		switch {
+		case list.rga != nil && list.gen.After(in):
+			return nil
+		case in.After(list.gen):
+			// The sender saw a reset this node missed: learn it and adopt the
+			// sender's incarnation, dropping the local elements.
+			raiseTombstone(shard, key, in)
+			list.rga = newRGAList()
+			list.pending = nil
+			list.gen = in
+		}
 	} else {
 		list = NewListValue()
+		raiseTombstone(shard, key, in)
+		list.gen = in
 	}
 	if list.rga == nil {
 		list.rga = newRGAList()

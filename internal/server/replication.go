@@ -92,6 +92,7 @@ func (h *StoreReplicationHandler) LocalDigest(shardIdx int) []cluster.SyncEntry 
 			Deleted:     e.Deleted,
 			Hash:        e.Hash,
 			TTL:         e.TTL,
+			Flush:       e.Flush,
 		}
 		if e.TTL {
 			se.Value = []byte(strconv.FormatInt(e.Deadline, 10))
@@ -438,6 +439,12 @@ func (h *StoreReplicationHandler) ApplyReplication(event cluster.ReplicationEven
 		h.Store.RemoveExpiry(event.Key)
 		return nil
 	case "FLUSHALL", "FLUSHDB":
+		// A stamped FLUSHALL removes only what was written before it and blocks
+		// re-delivery of that data; unstamped events (older senders) clear all.
+		if event.HLCPhysical != 0 || event.HLCLogical != 0 {
+			h.Store.FlushLWW(event.HLCPhysical, event.HLCLogical, event.HLCOrigin)
+			return nil
+		}
 		h.Store.Clear()
 		return nil
 	default:

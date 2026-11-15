@@ -102,7 +102,10 @@ func (cm *ClusterManager) handleSyncResponse(msg *Message) error {
 	for _, e := range resp.Entries {
 		var op string
 		value := e.Value
-		if e.Counter {
+		if e.Flush {
+			// Stamped FLUSHALL; reaches nodes that missed the event.
+			op = "FLUSHALL"
+		} else if e.Counter {
 			// PN-counter state; apply path max-merges it.
 			op = "COUNTER"
 		} else if e.List {

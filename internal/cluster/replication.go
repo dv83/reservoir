@@ -38,6 +38,9 @@ type SyncEntry struct {
 	// TTL marks a TTL-register entry: Value holds the deadline (unix nanos, as
 	// decimal; "0" means PERSIST), reconciled by the LWW stamp.
 	TTL bool `json:"ttl,omitempty"`
+	// Flush marks the sender's newest stamped FLUSHALL (Key empty), applied
+	// as a FLUSHALL at that stamp.
+	Flush bool `json:"flush,omitempty"`
 }
 
 // SyncRequest asks a peer for the LWW digest of one shard.

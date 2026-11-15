@@ -493,3 +493,90 @@ func TestClusterWriteAfterExpiryStartsFresh(t *testing.T) {
 		t.Fatalf("nodes did not converge on %v with no TTL", want)
 	}
 }
+
+// seedEveryType writes a string, set, hash, counter and list on origin and waits
+// until every node holds all of them.
+func seedEveryType(t *testing.T, nodes []*e2eNode, origin *Server) []string {
+	t.Helper()
+	origin.replicateWrite("SET", "rs", []byte("v"))
+	runHandler(t, origin, commands.HandleZeroCopySAddWithReplication, "rset", "a")
+	runHandler(t, origin, commands.HandleZeroCopyHSetWithReplication, "rhash", "f", "v")
+	runHandler(t, origin, commands.HandleZeroCopyIncrWithReplication, "rctr")
+	runHandler(t, origin, commands.HandleZeroCopyRPushWithReplication, "rlist", "x")
+	keys := []string{"rs", "rset", "rhash", "rctr", "rlist"}
+	if !eventually(10*time.Second, func() bool {
+		for _, n := range nodes {
+			if n.store.Exists(keys...) != int64(len(keys)) {
+				return false
+			}
+		}
+		return true
+	}) {
+		t.Fatal("seed writes did not replicate")
+	}
+	return keys
+}
+
+// TestClusterDeleteNotUndoneByAntiEntropy (fix-key-reset-convergence, task 1.3):
+// a DEL applied on one node only must win everywhere after anti-entropy, for
+// every key type. Previously peers handed sets, hashes, counters and lists back
+// to the deleting node, because container apply paths ignored the tombstone.
+func TestClusterDeleteNotUndoneByAntiEntropy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cluster e2e test in -short mode")
+	}
+	nodes := newE2ECluster(t)
+	origin := &Server{kvStore: nodes[0].store, clusterManager: nodes[0].cm}
+	keys := seedEveryType(t, nodes, origin)
+
+	// The DELs are applied on the origin only — peers miss them.
+	for _, k := range keys {
+		p, l, o := nodes[0].cm.NextStamp()
+		nodes[0].store.DeleteLWW(k, p, l, o)
+	}
+	fullReconcile(nodes)
+	fullReconcile(nodes)
+
+	for i, n := range nodes {
+		for _, k := range keys {
+			if n.store.Exists(k) != 0 {
+				t.Errorf("node %d: %s came back after DEL", i, k)
+			}
+		}
+	}
+}
+
+// TestClusterFlushAllConverges (fix-key-reset-convergence, task 1.3): a
+// FLUSHALL that a peer missed still empties every node through anti-entropy,
+// and a write stamped after the FLUSHALL survives on every node.
+func TestClusterFlushAllConverges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cluster e2e test in -short mode")
+	}
+	nodes := newE2ECluster(t)
+	origin := &Server{kvStore: nodes[0].store, clusterManager: nodes[0].cm}
+	keys := seedEveryType(t, nodes, origin)
+
+	// FLUSHALL on the origin only — the peers miss the event.
+	p, l, o := nodes[0].cm.NextStamp()
+	nodes[0].store.FlushLWW(p, l, o)
+
+	// A write after the FLUSHALL, on a peer that has not seen it yet.
+	time.Sleep(time.Millisecond)
+	peer := &Server{kvStore: nodes[1].store, clusterManager: nodes[1].cm}
+	peer.replicateWrite("SET", "after", []byte("kept"))
+
+	fullReconcile(nodes)
+	fullReconcile(nodes)
+
+	for i, n := range nodes {
+		for _, k := range keys {
+			if n.store.Exists(k) != 0 {
+				t.Errorf("node %d: %s survived or came back after FLUSHALL", i, k)
+			}
+		}
+		if v, _ := n.store.Get("after"); v != "kept" {
+			t.Errorf("node %d: write after FLUSHALL = %q, want kept", i, v)
+		}
+	}
+}
