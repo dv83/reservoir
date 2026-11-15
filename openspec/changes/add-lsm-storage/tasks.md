@@ -20,7 +20,7 @@
 
 - [x] 4.1 `--storage=lsm` with Pebble's WAL and periodic sync; restart without log replay
 - [x] 4.2 Restart and crash tests: every acknowledged write outside the sync window survives
-- [ ] 4.3 Cluster e2e test: three LSM nodes converge with a cache far smaller than the data
+- [x] 4.3 Cluster e2e test: three LSM nodes converge with a cache far smaller than the data
 
 ## 5. Measure and optimize
 

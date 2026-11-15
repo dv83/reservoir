@@ -14,6 +14,7 @@ import (
 
 	"reservoir/internal/cluster"
 	"reservoir/internal/commands"
+	"reservoir/internal/lsmengine"
 	"reservoir/internal/protocol"
 	"reservoir/internal/store"
 )
@@ -659,6 +660,88 @@ func TestClusterTieredDatasetLargerThanRAM(t *testing.T) {
 		}
 		if used := nd.store.GetMemoryUsage(); used > budget*11/10 {
 			t.Errorf("node %d uses %d bytes, budget %d", i, used, budget)
+		}
+	}
+}
+
+// newLSME2ECluster is newE2ECluster with every node in LSM storage mode and a
+// key cache of the given size.
+func newLSME2ECluster(t *testing.T, cache int64) []*e2eNode {
+	t.Helper()
+	clusterID := cluster.NewUUIDv7()
+	var nodes []*e2eNode
+	for i := 0; i < 3; i++ {
+		st := store.NewStore(&store.Limits{MaxKeySize: 1024, MaxValueSize: 1 << 20, MaxMemoryUsage: cache})
+		if err := st.EnableLSM(t.TempDir(), lsmengine.Options{CacheBytes: 1 << 20}); err != nil {
+			t.Fatal(err)
+		}
+		nodes = append(nodes, newE2ENodeWithStore(t, clusterID, st))
+	}
+	return joinE2ECluster(t, nodes)
+}
+
+// TestClusterLSMConverges (add-lsm-storage, task 4.3): three LSM nodes whose
+// key caches hold a small fraction of the data converge after writes on every
+// node, overwrites, deletes a peer missed and anti-entropy — reads, digests
+// and deletes all reach keys that live only on disk.
+func TestClusterLSMConverges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cluster e2e test in -short mode")
+	}
+	const n = 6000
+	nodes := newLSME2ECluster(t, 256<<10)
+	val := func(i, gen int) string { return fmt.Sprintf("%d-%d-%s", i, gen, strings.Repeat("v", 40)) }
+	for i := 0; i < n; i++ {
+		nodes[i%3].set(fmt.Sprintf("lk%d", i), val(i, 0))
+	}
+	for i := 0; i < n; i += 7 {
+		nodes[(i+1)%3].set(fmt.Sprintf("lk%d", i), val(i, 1))
+	}
+	nodes[0].sadd("lset", "a", "b")
+	// Deletes applied on one node only; anti-entropy must carry them.
+	for i := 1; i < n; i += 50 {
+		p, l, o := nodes[2].cm.NextStamp()
+		nodes[2].store.DeleteLWW(fmt.Sprintf("lk%d", i), p, l, o)
+	}
+	want := func(i int) (string, bool) {
+		if i%50 == 1 {
+			return "", false
+		}
+		if i%7 == 0 {
+			return val(i, 1), true
+		}
+		return val(i, 0), true
+	}
+	converged := func() bool {
+		for _, nd := range nodes {
+			for i := 0; i < n; i++ {
+				v, ok := nd.store.Get(fmt.Sprintf("lk%d", i))
+				wv, wok := want(i)
+				if ok != wok || v != wv {
+					return false
+				}
+			}
+			if c, _ := nd.store.SCard("lset"); c != 2 {
+				return false
+			}
+		}
+		return true
+	}
+	// Replication carries the writes; the deletes made on one node only reach
+	// the others through anti-entropy.
+	eventually(3*time.Second, converged)
+	fullReconcile(nodes)
+	if !converged() {
+		for i, nd := range nodes {
+			t.Logf("node %d: %d keys", i, nd.store.GetKeyCount())
+		}
+		t.Fatal("LSM nodes did not converge")
+	}
+	for i, nd := range nodes {
+		used := nd.store.GetMemoryUsage()
+		t.Logf("node %d: %d keys, cache memory %d", i, nd.store.GetKeyCount(), used)
+		if used > 256<<10*12/10 {
+			t.Errorf("node %d cache %d over its 256KB budget", i, used)
 		}
 	}
 }
